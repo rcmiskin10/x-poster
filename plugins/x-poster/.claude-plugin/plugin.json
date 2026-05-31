@@ -1,0 +1,11 @@
+{
+  "name": "x-poster",
+  "displayName": "X Poster",
+  "version": "1.0.0",
+  "description": "Post a tweet or a linear thread (with optional image) to X from the terminal. Bring your own X app; OAuth2-PKCE bootstrap; dry-run cost preview; never auto-publishes.",
+  "author": { "name": "rcmisk", "url": "https://github.com/rcmiskin10" },
+  "homepage": "https://github.com/rcmiskin10/x-poster-marketplace/tree/main/plugins/x-poster",
+  "repository": "https://github.com/rcmiskin10/x-poster-marketplace",
+  "license": "MIT",
+  "keywords": ["x", "twitter", "social", "posting", "oauth2"]
+}

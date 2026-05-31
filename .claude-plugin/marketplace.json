@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "x-poster-marketplace",
+  "description": "Terminal-to-X poster for Claude Code.",
+  "owner": { "name": "rcmisk", "email": "rcmiskin10@users.noreply.github.com" },
+  "plugins": [
+    {
+      "name": "x-poster",
+      "description": "Post a tweet or thread (with optional image) to X from the terminal. BYO X app; OAuth2-PKCE; dry-run cost preview; never auto-publishes.",
+      "author": { "name": "rcmisk", "email": "rcmiskin10@users.noreply.github.com" },
+      "source": "./plugins/x-poster",
+      "category": "productivity",
+      "homepage": "https://github.com/rcmiskin10/x-poster-marketplace/tree/main/plugins/x-poster"
+    }
+  ]
+}
