@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "x-poster-marketplace",
+  "name": "x-poster",
   "description": "Terminal-to-X poster for Claude Code.",
   "owner": { "name": "rcmisk", "email": "rcmiskin10@users.noreply.github.com" },
   "plugins": [
@@ -10,7 +10,7 @@
       "author": { "name": "rcmisk", "email": "rcmiskin10@users.noreply.github.com" },
       "source": "./plugins/x-poster",
       "category": "productivity",
-      "homepage": "https://github.com/rcmiskin10/x-poster-marketplace/tree/main/plugins/x-poster"
+      "homepage": "https://github.com/rcmiskin10/x-poster/tree/main/plugins/x-poster"
     }
   ]
 }

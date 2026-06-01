@@ -16,8 +16,8 @@ credentials are absent — a bare run can never spend.
 ## Install
 
 ```
-/plugin marketplace add rcmiskin10/x-poster-marketplace
-/plugin install x-poster@x-poster-marketplace
+/plugin marketplace add rcmiskin10/x-poster
+/plugin install x-poster@x-poster
 ```
 
 (Local dev before publishing: `claude --plugin-dir ./plugins/x-poster`.)

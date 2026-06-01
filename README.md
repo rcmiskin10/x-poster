@@ -40,8 +40,8 @@ in the terminal, this is for you.
 ## Install
 
 ```
-/plugin marketplace add rcmiskin10/x-poster-marketplace
-/plugin install x-poster@x-poster-marketplace
+/plugin marketplace add rcmiskin10/x-poster
+/plugin install x-poster@x-poster
 ```
 
 Then a one-time setup: create your own X app, mint a refresh token, point one env var at a writable
