@@ -1,11 +1,19 @@
 {
   "name": "x-poster",
   "displayName": "X Poster",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Post a tweet or a linear thread (with optional image) to X from the terminal. Bring your own X app; OAuth2-PKCE bootstrap; dry-run cost preview; never auto-publishes.",
   "author": { "name": "rcmisk", "url": "https://github.com/rcmiskin10" },
   "homepage": "https://github.com/rcmiskin10/x-poster/tree/main/plugins/x-poster",
   "repository": "https://github.com/rcmiskin10/x-poster",
   "license": "MIT",
-  "keywords": ["x", "twitter", "social", "posting", "oauth2"]
+  "keywords": ["x", "twitter", "social", "posting", "oauth2"],
+  "userConfig": {
+    "env_file": {
+      "type": "string",
+      "title": "X credentials env file",
+      "description": "Absolute path to your writable env file holding X_CLIENT_ID, X_CLIENT_SECRET, and X_REFRESH_TOKEN. Rotated refresh tokens are written back here, so it must be writable and yours (never the read-only plugin dir). Create it from env/.env.example and mint the token with bin/x-auth.mjs. Optional: if unset, the command falls back to the X_ENV_FILE environment variable.",
+      "required": false
+    }
+  }
 }

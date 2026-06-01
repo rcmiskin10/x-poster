@@ -64,15 +64,27 @@ Claude Code plugins cannot set permissions for you. Add an allow-rule for the po
 { "permissions": { "allow": ["Bash(node --env-file=*)"] } }
 ```
 
-## 5. Use it
+## 5. Tell the command where your env file is
+
+Point the plugin at the env file once, so you never have to export anything:
 
 ```
-export X_ENV_FILE="$PWD/x-poster.env"   # so rotated tokens persist to the right file
+/plugin configure x-poster        # prompts for "X credentials env file" → enter the absolute path
+```
+
+(or set it at install time: `claude plugin install x-poster@x-poster --config env_file=/abs/path/x-poster.env`)
+
+Prefer not to use plugin config? The command also honors a plain `export X_ENV_FILE="$PWD/x-poster.env"`.
+The configured value takes priority; the env var is the fallback.
+
+## 6. Use it
+
+```
 /x-poster:x-post draft a post about what I shipped today
 ```
 
 It drafts, scores against the built-in rubric, **dry-runs the cost**, then asks **"ship it?"** —
-nothing posts until you confirm.
+nothing posts until you confirm. Rotated refresh tokens are written back to your env file automatically.
 
 **Cost:** X pay-per-use, ~$0.015/post, ~$0.20/post-with-URL.
 

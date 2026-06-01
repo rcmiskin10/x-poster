@@ -16,7 +16,12 @@ Turn `$ARGUMENTS` into an X post, gate it, and (only on your explicit OK) post i
 
 ## Prerequisites (one-time, see README)
 - The user has their own X app creds in a writable env file and has minted `X_REFRESH_TOKEN` via
-  `x-auth.mjs`. Read the env-file path from `$X_ENV_FILE` (ask the user if unset).
+  `x-auth.mjs`.
+- **Resolving the env-file path.** Every command below sets `ENV_FILE` from, in priority order:
+  the plugin config (`$CLAUDE_PLUGIN_OPTION_ENV_FILE`, set via `/plugin configure x-poster` or
+  `--config env_file=...` at install), then the `$X_ENV_FILE` environment variable. If BOTH are
+  empty, ask the user for the path. The shell snippet `ENV_FILE="${CLAUDE_PLUGIN_OPTION_ENV_FILE:-$X_ENV_FILE}"`
+  does this; the commands persist rotated tokens back to that same file.
 
 ## What this command does
 
@@ -33,7 +38,8 @@ Turn `$ARGUMENTS` into an X post, gate it, and (only on your explicit OK) post i
 
 3. **Cost + validation (dry-run, posts nothing):**
    ```bash
-   node --env-file="$X_ENV_FILE" "${CLAUDE_PLUGIN_ROOT}/bin/x-post.mjs" \
+   ENV_FILE="${CLAUDE_PLUGIN_OPTION_ENV_FILE:-$X_ENV_FILE}"
+   node --env-file="$ENV_FILE" "${CLAUDE_PLUGIN_ROOT}/bin/x-post.mjs" \
      --dry-run [--image <abs-path>] --thread "<tweet 1>" "<tweet 2>" ...
    ```
    (Use `--text "<tweet>"` for a single post.) Surface `estimatedCostUsd`, `hasImage`, and any `errors`.
@@ -42,9 +48,11 @@ Turn `$ARGUMENTS` into an X post, gate it, and (only on your explicit OK) post i
    attached, and the estimated cost. Ask: **"Reply 'ship it' to post, or tell me what to change."**
    Do not proceed until the human affirmatively confirms.
 
-5. **Post (only on confirmation).** Set `X_ENV_FILE` so the rotated refresh token is persisted back:
+5. **Post (only on confirmation).** Pass the resolved path as `X_ENV_FILE` too, so the rotated refresh
+   token is persisted back to it:
    ```bash
-   X_ENV_FILE="$X_ENV_FILE" node --env-file="$X_ENV_FILE" "${CLAUDE_PLUGIN_ROOT}/bin/x-post.mjs" \
+   ENV_FILE="${CLAUDE_PLUGIN_OPTION_ENV_FILE:-$X_ENV_FILE}"
+   X_ENV_FILE="$ENV_FILE" node --env-file="$ENV_FILE" "${CLAUDE_PLUGIN_ROOT}/bin/x-post.mjs" \
      --confirm [--image <abs-path>] --thread "<tweet 1>" "<tweet 2>" ...
    ```
    Report the live URL(s) it returns. If creds are absent, say so and stop at the dry-run.

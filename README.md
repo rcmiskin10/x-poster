@@ -44,8 +44,9 @@ in the terminal, this is for you.
 /plugin install x-poster@x-poster
 ```
 
-Then a one-time setup: create your own X app, mint a refresh token, point one env var at a writable
-file. Full steps in [plugins/x-poster/README.md](plugins/x-poster/README.md), about 5 minutes.
+Then a one-time setup: create your own X app, mint a refresh token, and point the plugin at your env
+file with `/plugin configure x-poster`. Full steps in
+[plugins/x-poster/README.md](plugins/x-poster/README.md), about 5 minutes.
 
 ## Use it
 
