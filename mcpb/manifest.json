@@ -1,0 +1,49 @@
+{
+  "manifest_version": "0.3",
+  "name": "x-poster",
+  "version": "0.1.0",
+  "description": "Post a tweet or thread (with optional image) to X. Preview cost first; never auto-publishes.",
+  "author": { "name": "rcmisk" },
+  "license": "MIT",
+  "server": {
+    "type": "node",
+    "entry_point": "server.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server.mjs"],
+      "env": {
+        "X_CLIENT_ID": "${user_config.X_CLIENT_ID}",
+        "X_CLIENT_SECRET": "${user_config.X_CLIENT_SECRET}",
+        "X_REFRESH_TOKEN": "${user_config.X_REFRESH_TOKEN}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "preview_post", "description": "Validate + cost-preview a tweet/thread. No side effects." },
+    { "name": "publish_post", "description": "Post to X after explicit confirmation. The only writer." },
+    { "name": "auth_instructions", "description": "How to mint your X refresh token (one-time)." }
+  ],
+  "user_config": {
+    "X_CLIENT_ID": {
+      "type": "string",
+      "title": "X API Client ID",
+      "description": "OAuth2 client ID from your X Developer App",
+      "sensitive": true,
+      "required": true
+    },
+    "X_CLIENT_SECRET": {
+      "type": "string",
+      "title": "X API Client Secret",
+      "description": "OAuth2 client secret from your X Developer App",
+      "sensitive": true,
+      "required": true
+    },
+    "X_REFRESH_TOKEN": {
+      "type": "string",
+      "title": "X Refresh Token (seed)",
+      "description": "Initial refresh token minted via bin/x-auth.mjs. The server rotates it automatically on each use.",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}

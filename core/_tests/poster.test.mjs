@@ -1,10 +1,10 @@
-// Tests for bin/x-post.mjs — pure planning/cost core (no network). Run: node --test bin/_tests/
+// Tests for core/poster.mjs — pure planning/cost core (no network). Run: node --test core/_tests/
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { containsUrl, postCost, costEstimate, buildPlan, persistRefreshToken, mediaTypeForPath } from "../x-post.mjs";
+import { containsUrl, postCost, costEstimate, buildPlan, persistRefreshToken, mediaTypeForPath } from "../poster.mjs";
 
 test("containsUrl detects links and bare domains, not plain text", () => {
   assert.equal(containsUrl("just a normal tweet about shipping"), false);

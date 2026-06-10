@@ -1,13 +1,14 @@
 {
   "name": "x-poster",
   "displayName": "X Poster",
-  "version": "1.1.0",
-  "description": "Post a tweet or a linear thread (with optional image) to X from the terminal. Bring your own X app; OAuth2-PKCE bootstrap; dry-run cost preview; never auto-publishes.",
+  "version": "1.2.0",
+  "description": "Post a tweet or a linear thread (with optional image) to X from the terminal. Bring your own X app; OAuth2-PKCE bootstrap; dry-run cost preview; never auto-publishes. Also ships an MCP server with preview_post and publish_post tools for use directly inside Claude Code.",
   "author": { "name": "rcmisk", "url": "https://github.com/rcmiskin10" },
   "homepage": "https://github.com/rcmiskin10/x-poster/tree/main/plugins/x-poster",
   "repository": "https://github.com/rcmiskin10/x-poster",
   "license": "MIT",
-  "keywords": ["x", "twitter", "social", "posting", "oauth2"],
+  "keywords": ["x", "twitter", "social", "posting", "oauth2", "mcp"],
+  "hooks": "./hooks/hooks.json",
   "userConfig": {
     "env_file": {
       "type": "string",

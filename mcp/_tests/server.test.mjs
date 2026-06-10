@@ -1,0 +1,41 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { makeTools } from "../server.mjs";
+
+const noNet = () => { throw new Error("network called during preview!"); };
+
+test("preview_post performs zero network I/O and returns cost", async () => {
+  const tools = makeTools({ postThread: noNet, refreshAccessToken: noNet, statePath: "/tmp/none", seed: "S" });
+  const r = await tools.preview_post.handler({ text: "hello https://x.com/foo" });
+  assert.equal(r.isThread, false);
+  assert.equal(r.estimatedCostUsd, 0.2);
+  assert.ok(r.confirm_nonce, "issues a nonce");
+});
+
+test("publish_post refuses on validation error (empty)", async () => {
+  const tools = makeTools({ postThread: noNet, refreshAccessToken: noNet, statePath: "/tmp/none", seed: "S" });
+  await assert.rejects(() => tools.publish_post.handler({ text: "" }), /empty|no tweets/i);
+});
+
+test("publish_post refuses without a valid nonce when elicitation unsupported", async () => {
+  const tools = makeTools({ postThread: noNet, refreshAccessToken: noNet, statePath: "/tmp/none", seed: "S", elicit: null });
+  await assert.rejects(() => tools.publish_post.handler({ text: "ok" }), /confirm|nonce/i);
+});
+
+test("publish_post recomputes cost server-side and posts with a valid nonce", async () => {
+  let posted = null;
+  const tools = makeTools({
+    postThread: async (tweets) => { posted = tweets; return ["111"]; },
+    refreshAccessToken: async () => "ACCESS", statePath: "/tmp/none", seed: "S", elicit: null,
+  });
+  const { confirm_nonce } = await tools.preview_post.handler({ text: "shipit" });
+  const r = await tools.publish_post.handler({ text: "shipit", confirm_nonce });
+  assert.deepEqual(posted, ["shipit"]);
+  assert.match(r.urls[0], /x\.com/);
+});
+
+test("a nonce minted for one payload does not authorize a different payload", async () => {
+  const tools = makeTools({ postThread: async()=>["1"], refreshAccessToken: async()=>"A", statePath:"/tmp/none", seed:"S", elicit:null });
+  const { confirm_nonce } = await tools.preview_post.handler({ text: "A" });
+  await assert.rejects(() => tools.publish_post.handler({ text: "B", confirm_nonce }), /confirm|nonce|mismatch/i);
+});

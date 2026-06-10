@@ -1,0 +1,11 @@
+{
+  "name": "@x-poster/claude-plugin",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dependency manifest for the x-poster Claude Code plugin MCP server.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0"
+  },
+  "engines": { "node": ">=20" }
+}

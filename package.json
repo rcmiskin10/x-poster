@@ -1,0 +1,9 @@
+{
+  "name": "x-poster",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"core/_tests/*.test.mjs\" \"mcp/_tests/*.test.mjs\""
+  }
+}

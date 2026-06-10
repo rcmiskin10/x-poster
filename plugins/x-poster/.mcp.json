@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "x-poster": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/x-mcp.mjs"],
+      "env": {
+        "X_STATE_FILE": "${CLAUDE_PLUGIN_DATA}/token",
+        "NODE_PATH": "${CLAUDE_PLUGIN_DATA}/node_modules"
+      }
+    }
+  }
+}
