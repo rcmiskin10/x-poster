@@ -5,8 +5,8 @@ import { join } from "node:path";
 const ROOT = new URL("../..", import.meta.url).pathname;
 const SURFACES = ["plugins/x-poster/bin", "mcp", "mcpb"];
 
-// core/poster.mjs and core/token-store.mjs must be byte-identical across all three surfaces.
-for (const f of ["poster.mjs", "token-store.mjs"]) {
+// core/poster.mjs, core/token-store.mjs, and core/auth.mjs must be byte-identical across all three surfaces.
+for (const f of ["poster.mjs", "token-store.mjs", "auth.mjs"]) {
   const src = readFileSync(join(ROOT, "core", f), "utf8");
   for (const s of SURFACES) {
     test(`vendored ${s}/_${f} matches core/${f}`, () => {

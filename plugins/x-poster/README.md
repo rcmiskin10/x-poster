@@ -45,7 +45,13 @@ cp "${CLAUDE_PLUGIN_ROOT}/env/.env.example" ./x-poster.env
 
 Fill in `X_CLIENT_ID` and `X_CLIENT_SECRET`.
 
-## 3. Mint your refresh token (one time)
+## 3. Connect your X account (one time)
+
+**Easiest — no terminal:** in any Claude session with the plugin's MCP server connected, say
+*"authorize x-poster"*. Claude returns a link; open it, click **Authorize**, done. The refresh
+token is persisted to the plugin's state file automatically.
+
+**Terminal alternative** (used by the `/x-poster:x-post` slash command's env-file path):
 
 ```
 node --env-file=./x-poster.env "${CLAUDE_PLUGIN_ROOT}/bin/x-auth.mjs"

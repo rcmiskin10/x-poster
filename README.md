@@ -23,7 +23,9 @@ protocol level:
 - **`publish_post`** — the only writer. Recomputes cost server-side, then either uses MCP
   elicitation (if the client supports it) or requires the `confirm_nonce` from `preview_post`.
   Nothing posts without an explicit confirmation step.
-- **`auth_instructions`** — returns the step-by-step command to mint a refresh token.
+- **`authorize`** — one-time account connection, right in the chat: it returns a link, you click
+  Authorize on X, done. No terminal, no scripts.
+- **`auth_instructions`** — setup help (the X-app checklist and auth options).
 
 Cost: ~$0.015/post, ~$0.20/post-with-URL (X pay-per-use, billed to your own X app).
 
@@ -56,25 +58,54 @@ in the terminal, this is for you.
 
 ---
 
-## Install as a connector (Claude Desktop, Claude Code, or MCP-for-Windows)
+## Set up in ~5 minutes — no terminal needed
 
-The `.mcpb` bundle format works in **Claude Desktop, Claude Code, and MCP-for-Windows** — it is not
-Desktop-only.
+Three steps, all in your browser and Claude. This is the recommended path for everyone.
 
-**Option A — use the pre-built bundle** (if `x-poster.mcpb` is present in this repo):
-1. Drag `x-poster.mcpb` into Claude settings → Extensions (Desktop) / Connectors (Code), or
-   double-click it.
-2. Enter `X_CLIENT_ID`, `X_CLIENT_SECRET`, and `X_REFRESH_TOKEN` when prompted. These are stored
-   in the OS keychain — you will not be asked again.
+### Step 1 — Create your (free) X app
 
-**Option B — build it yourself:**
-```bash
-cd _packages/x-poster
-bash scripts/build-mcpb.sh          # outputs x-poster.mcpb
-```
-Then drag or double-click to install as above.
+This is the only fiddly part, and it's a one-time copy-paste exercise:
 
-**What you enter at install time is the SEED** (see token rotation warning below).
+1. Go to [developer.x.com](https://developer.x.com), sign in with your X account, and create a
+   Project + App (the free tier is fine).
+2. Open your app's **User authentication settings** → **Edit** and enter exactly:
+
+   | Setting | Value |
+   |---|---|
+   | App permissions | **Read and write** |
+   | Type of App | **Web App, Automated App or Bot** (confidential client) |
+   | Callback URI / Redirect URL | `http://127.0.0.1:8723/callback` |
+   | Website URL | anything, e.g. your X profile URL |
+
+   If your portal shows a scopes picker, enable: `tweet.read`, `tweet.write`, `users.read`,
+   `media.write` (image upload), `offline.access` (stay signed in).
+
+3. Save, then copy the **Client ID** and **Client Secret** it shows you (Keys and tokens tab).
+   Keep them somewhere safe for the next step.
+
+### Step 2 — Install the connector
+
+1. Download `x-poster-<version>.mcpb` from the
+   [latest release](https://github.com/rcmiskin10/x-poster/releases/latest).
+2. Double-click it (Claude Desktop), or drag it into Claude settings → Extensions / Connectors.
+3. Paste the **Client ID** and **Client Secret** when prompted. **Leave the Refresh Token field
+   blank.** They're stored in your OS keychain — you won't be asked again.
+
+### Step 3 — Connect your X account (in the chat)
+
+Tell Claude:
+
+> authorize x-poster
+
+It replies with a link. Open it, click **Authorize app**, and you'll see "Authorized ✓ — you can
+close this tab." That's it. Now try:
+
+> post a tweet: hello from x-poster
+
+Claude previews the post and the cost first, and nothing publishes until you say yes.
+
+**Building the bundle yourself instead:** `bash scripts/build-mcpb.sh` outputs `x-poster.mcpb`;
+install it the same way.
 
 ---
 
@@ -122,20 +153,10 @@ Nothing posts until you say so.
 
 ---
 
-## 1. Create your own X app
+## CLI alternative: mint the refresh token in a terminal
 
-At [developer.x.com](https://developer.x.com), create a project/app, then in **User authentication
-settings**:
-
-- App type: **Web App / Confidential client**
-- Add this **exact** callback URL: `http://127.0.0.1:8723/callback`
-  (If port 8723 is taken, pick another, set `X_AUTH_PORT`, and register the matching URL.)
-- Scopes: `tweet.read tweet.write users.read media.write offline.access`
-  - `media.write` is **required** for image upload.
-  - `offline.access` is **required** to receive a refresh token.
-- Copy the app's **Client ID** and **Client Secret**.
-
-## 2. Mint your refresh token (one time)
+Prefer env files over the in-chat `authorize` tool (e.g. for the slash-command path)? Same X app
+as Step 1 above, then:
 
 ```bash
 node --env-file=./x-poster.env bin/x-auth.mjs
@@ -143,6 +164,8 @@ node --env-file=./x-poster.env bin/x-auth.mjs
 
 A browser opens — click **Authorize**. The script prints `X_REFRESH_TOKEN=…`. Paste that line into
 your env file. The token stays on your machine; nothing is committed.
+
+(If port 8723 is taken, pick another, set `X_AUTH_PORT`, and register the matching callback URL.)
 
 ---
 

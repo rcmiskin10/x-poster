@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "x-poster",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Post a tweet or thread (with optional image) to X. Preview cost first; never auto-publishes.",
   "author": { "name": "rcmisk" },
   "license": "MIT",
@@ -21,7 +21,8 @@
   "tools": [
     { "name": "preview_post", "description": "Validate + cost-preview a tweet/thread. No side effects." },
     { "name": "publish_post", "description": "Post to X after explicit confirmation. The only writer." },
-    { "name": "auth_instructions", "description": "How to mint your X refresh token (one-time)." }
+    { "name": "authorize", "description": "Connect your X account — returns a link to click. One-time, no terminal." },
+    { "name": "auth_instructions", "description": "Setup help (X app checklist + auth options)." }
   ],
   "user_config": {
     "X_CLIENT_ID": {
@@ -40,10 +41,10 @@
     },
     "X_REFRESH_TOKEN": {
       "type": "string",
-      "title": "X Refresh Token (seed)",
-      "description": "Initial refresh token minted via bin/x-auth.mjs. The server rotates it automatically on each use.",
+      "title": "X Refresh Token (optional)",
+      "description": "Leave blank — after installing, just ask Claude to run the authorize tool and click the link. (Power users: paste a token minted via bin/x-auth.mjs instead.)",
       "sensitive": true,
-      "required": true
+      "required": false
     }
   }
 }

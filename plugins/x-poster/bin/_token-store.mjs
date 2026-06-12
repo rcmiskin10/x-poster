@@ -2,7 +2,8 @@
 // Precedence: the state FILE wins whenever it exists; the seed (keychain/env) is used
 // ONLY on a cold start before any rotation. After the first persist the seed is dead —
 // never fall back to it, or X reuse-detection can revoke the whole grant.
-import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 export function makeTokenStore({ statePath, seedRefreshToken }) {
   let inflight = null;
@@ -15,6 +16,7 @@ export function makeTokenStore({ statePath, seedRefreshToken }) {
     return seedRefreshToken;
   };
   const persist = (token) => {
+    mkdirSync(dirname(statePath), { recursive: true }); // fresh installs have no state dir yet
     const tmp = statePath + ".tmp";
     writeFileSync(tmp, token, { mode: 0o600 });   // atomic: write temp then rename
     renameSync(tmp, statePath);

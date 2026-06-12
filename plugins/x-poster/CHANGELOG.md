@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.0
+- **No-terminal setup: new `authorize` MCP tool.** Connecting your X account no longer requires
+  cloning the repo, creating an env file, or running `bin/x-auth.mjs`. Ask Claude to authorize,
+  click the link it returns, approve on X — the localhost callback exchanges the code and persists
+  the refresh token automatically. The `.mcpb` refresh-token field is now optional (leave it blank).
+- The OAuth-PKCE flow moved to `core/auth.mjs` (single source of truth, vendored like the rest of
+  core); `bin/x-auth.mjs` now consumes it and remains as the CLI alternative.
+- Friendlier failure: publishing before authorizing now says "run the authorize tool" instead of
+  surfacing an opaque OAuth error. Token-store creates its state directory on first persist
+  (fresh installs no longer need a pre-existing `~/.local/state/x-poster/`).
+
 ## 1.2.1
 - Fix: the MCP server crashed at startup ("inputSchema must be a Zod schema or raw shape"),
   surfacing in clients as `MCP error -32000: Connection closed`. `registerTool` was passed plain

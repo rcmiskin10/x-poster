@@ -8,6 +8,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { buildPlan, costEstimate, containsUrl, postCost } from "./_poster.mjs";
 import { makeTokenStore } from "./_token-store.mjs";
+import { startAuthSession } from "./_auth.mjs";
 
 // ---------------------------------------------------------------------------
 // loadEnvFile — minimal KEY=VALUE parser (mirrors the CLI's X_ENV_FILE support
@@ -179,18 +180,23 @@ export function makeTools(deps) {
   // -------------------------------------------------------------------------
   async function authHandler() {
     return {
-      steps: [
-        "1. Create an X Developer App at https://developer.x.com with 'Read and Write' permissions.",
-        "2. Add 'http://localhost:3000/callback' as an OAuth 2.0 redirect URI.",
-        "3. Set environment variables: X_CLIENT_ID, X_CLIENT_SECRET.",
-        "4. Run the auth flow: node --env-file=.env bin/x-auth.mjs",
-        "5. The tool will print a refresh token. Set X_REFRESH_TOKEN=<value> in your .env file.",
-        "6. Start the MCP server: X_CLIENT_ID=... X_CLIENT_SECRET=... X_REFRESH_TOKEN=... node mcp/server.mjs",
+      easiest_path: [
+        "1. One-time, in a browser: create a free X Developer App at https://developer.x.com.",
+        "   In 'User authentication settings' set App type = Web App / Confidential client,",
+        "   add the EXACT callback URL http://127.0.0.1:8723/callback,",
+        "   and enable scopes: tweet.read tweet.write users.read media.write offline.access.",
+        "2. Give this MCP server the app's Client ID and Client Secret (the .mcpb install dialog asks for them).",
+        "3. Run the `authorize` tool — it returns a link. Open it, click Authorize, done. No terminal needed.",
       ],
-      command: "node --env-file=.env bin/x-auth.mjs",
-      envVars: ["X_CLIENT_ID", "X_CLIENT_SECRET", "X_REFRESH_TOKEN"],
+      cli_alternative: {
+        command: "node --env-file=.env bin/x-auth.mjs",
+        note: "Prints X_REFRESH_TOKEN=... to paste into your env file. Same flow, terminal flavor.",
+      },
+      envVars: ["X_CLIENT_ID", "X_CLIENT_SECRET"],
       optionalEnvVars: {
+        X_REFRESH_TOKEN: "Seed token — only needed if you skip the authorize tool",
         X_STATE_FILE: "Path to persist the rotating refresh token (default: ~/.local/state/x-poster/token)",
+        X_AUTH_PORT: "Callback port for authorize (default 8723; must match the registered callback URL)",
       },
     };
   }
@@ -220,6 +226,16 @@ let _postChain = Promise.resolve();
 
 export function makePostAdapter({ tokenStore, corePostThread, clientId, clientSecret }) {
   return (tweets, image) => {
+    // Fail with the FIX, not the symptom: a fresh install has no refresh token
+    // yet, and the cure is one authorize call — not an opaque OAuth 400.
+    try {
+      tokenStore.current();
+    } catch {
+      return Promise.reject(new Error(
+        "Not connected to your X account yet — run the authorize tool first. " +
+        "It returns a link; open it, click Authorize, done. No terminal needed.",
+      ));
+    }
     const run = _postChain.then(() =>
       corePostThread(
         tweets,
@@ -246,9 +262,11 @@ export async function startServer() {
   // Credential resolution. The .mcpb bundle injects creds via user_config → env.
   // The Claude Code plugin path has no UI for that, so it can point X_ENV_FILE at
   // the SAME env file the CLI uses. process.env always wins over the file.
+  // Blank .mcpb user_config fields arrive as empty strings — treat as unset.
+  const norm = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
   const fileCreds = process.env.X_ENV_FILE ? loadEnvFile(process.env.X_ENV_FILE) : {};
-  const clientId = process.env.X_CLIENT_ID ?? fileCreds.X_CLIENT_ID;
-  const clientSecret = process.env.X_CLIENT_SECRET ?? fileCreds.X_CLIENT_SECRET;
+  const clientId = norm(process.env.X_CLIENT_ID) ?? norm(fileCreds.X_CLIENT_ID);
+  const clientSecret = norm(process.env.X_CLIENT_SECRET) ?? norm(fileCreds.X_CLIENT_SECRET);
 
   // Fail fast with an actionable message rather than letting a missing client
   // credential surface as an opaque 401 at publish time.
@@ -263,7 +281,7 @@ export async function startServer() {
   const XDG_STATE_HOME = process.env.XDG_STATE_HOME || `${process.env.HOME}/.local/state`;
   const defaultStatePath = `${process.env.CLAUDE_PLUGIN_DATA || `${XDG_STATE_HOME}/x-poster`}/token`;
   const statePath = process.env.X_STATE_FILE || defaultStatePath;
-  const seedRefreshToken = process.env.X_REFRESH_TOKEN ?? fileCreds.X_REFRESH_TOKEN;
+  const seedRefreshToken = norm(process.env.X_REFRESH_TOKEN) ?? norm(fileCreds.X_REFRESH_TOKEN);
 
   const tokenStore = makeTokenStore({ statePath, seedRefreshToken });
 
@@ -361,6 +379,49 @@ export async function startServer() {
     },
     async () => {
       const result = await nonceTools.auth_instructions.handler();
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  // authorize — in-chat OAuth bootstrap. Replaces the terminal x-auth.mjs step:
+  // returns a link, the localhost callback exchanges the code and persists the
+  // refresh token into the token store. One active session at a time.
+  let activeAuthSession = null;
+  server.registerTool(
+    "authorize",
+    {
+      description:
+        "Connect x-poster to the user's X account. Returns a link the user must open and approve — present it as a clickable link. " +
+        "Run this on first-time setup, or when posting fails with 'not connected'. No terminal needed.",
+      inputSchema: {},
+    },
+    async () => {
+      activeAuthSession?.close();
+      activeAuthSession = null;
+      const port = Number(process.env.X_AUTH_PORT ?? 8723);
+      let session;
+      try {
+        session = await startAuthSession({
+          clientId,
+          clientSecret,
+          port,
+          onToken: (token) => tokenStore.persist(token),
+          onDone: () => { activeAuthSession = null; },
+        });
+      } catch (e) {
+        const hint = e.code === "EADDRINUSE"
+          ? ` Port ${port} is busy — close whatever is using it, or set X_AUTH_PORT to a free port AND register http://127.0.0.1:<port>/callback in your X app.`
+          : "";
+        throw new Error(`could not start the authorize listener: ${e.message}.${hint}`);
+      }
+      activeAuthSession = session;
+      const result = {
+        action_required: "Open this link in your browser and click 'Authorize app'.",
+        authorize_url: session.authorizeUrl,
+        expires: "The link is valid for 10 minutes.",
+        after_approving: "X redirects to a local page saying 'Authorized ✓'. Come back here and post — setup is done.",
+        troubleshooting: `If X shows a callback/redirect error, make sure ${session.redirectUri} is registered EXACTLY in your X app's callback URLs.`,
+      };
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   );

@@ -11,14 +11,16 @@ import { tmpdir } from "node:os";
 
 const serverPath = join(dirname(fileURLToPath(import.meta.url)), "..", "server.mjs");
 
-test("server completes an MCP stdio handshake and lists all three tools", async () => {
+test("server completes an MCP stdio handshake and lists all four tools", async () => {
   const child = spawn(process.execPath, [serverPath], {
     env: {
       HOME: process.env.HOME,
       PATH: process.env.PATH,
       X_CLIENT_ID: "test-client-id",
       X_CLIENT_SECRET: "test-client-secret",
-      X_REFRESH_TOKEN: "test-refresh-token",
+      // No X_REFRESH_TOKEN on purpose: a fresh install has no token yet, and
+      // publish must fail with an actionable "authorize first" message.
+      X_AUTH_PORT: "0",
       X_STATE_FILE: join(tmpdir(), `x-poster-stdio-test-${process.pid}`),
     },
     stdio: ["pipe", "pipe", "pipe"],
@@ -71,7 +73,7 @@ test("server completes an MCP stdio handshake and lists all three tools", async 
     const byName = Object.fromEntries(list.result.tools.map((t) => [t.name, t]));
     assert.deepEqual(
       Object.keys(byName).sort(),
-      ["auth_instructions", "preview_post", "publish_post"],
+      ["auth_instructions", "authorize", "preview_post", "publish_post"],
     );
     // Schemas must survive the zod → JSON Schema round-trip with params intact.
     for (const tool of ["preview_post", "publish_post"]) {
@@ -79,6 +81,26 @@ test("server completes an MCP stdio handshake and lists all three tools", async 
       assert.ok(byName[tool].inputSchema?.properties?.thread, `${tool} exposes 'thread'`);
     }
     assert.ok(byName.publish_post.inputSchema.properties.confirm_nonce, "publish_post exposes 'confirm_nonce'");
+
+    // authorize: starts a local listener (ephemeral port via X_AUTH_PORT=0) and
+    // returns a clickable X authorize link. No network I/O happens here.
+    rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "authorize", arguments: {} } });
+    const auth = await nextMessage();
+    assert.ok(auth.result, `authorize failed: ${JSON.stringify(auth.error)}`);
+    const payload = JSON.parse(auth.result.content[0].text);
+    assert.match(payload.authorize_url, /^https:\/\/x\.com\/i\/oauth2\/authorize\?/);
+    assert.match(payload.authorize_url, /code_challenge_method=S256/);
+
+    // publish with a VALID nonce but no token must fail with an actionable
+    // "authorize first" error, not an opaque OAuth failure. (An invalid nonce
+    // would fail earlier, at nonce verification — that path is already tested.)
+    rpc({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "preview_post", arguments: { text: "hi" } } });
+    const prev = await nextMessage();
+    const { confirm_nonce } = JSON.parse(prev.result.content[0].text);
+    rpc({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "publish_post", arguments: { text: "hi", confirm_nonce } } });
+    const pub = await nextMessage();
+    const pubText = JSON.stringify(pub);
+    assert.match(pubText, /authorize/i, "error points at the authorize tool, got: " + pubText);
   } finally {
     child.kill();
   }
