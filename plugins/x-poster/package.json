@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Dependency manifest for the x-poster Claude Code plugin MCP server.",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "4.4.3"
   },
   "engines": { "node": ">=20" }
 }

@@ -241,6 +241,7 @@ export function makePostAdapter({ tokenStore, corePostThread, clientId, clientSe
 export async function startServer() {
   const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
   const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+  const { z } = await import("zod");
 
   // Credential resolution. The .mcpb bundle injects creds via user_config → env.
   // The Claude Code plugin path has no UI for that, so it can point X_ENV_FILE at
@@ -286,22 +287,16 @@ export async function startServer() {
   // won't verify at publish. Use this shared instance for both.
   const nonceTools = buildTools(null);
 
-  // Register tools with JSON schema inputs
+  // Register tools with zod raw-shape inputs (SDK 1.29 rejects plain JSON Schema
+  // in registerTool — it only accepts Zod schemas / raw shapes).
   server.registerTool(
     "preview_post",
     {
       description: "Preview an X post or thread. Returns cost estimate and a confirm_nonce for publish_post. PURE — no network I/O.",
       inputSchema: {
-        type: "object",
-        properties: {
-          text: { type: "string", description: "Single tweet text (mutually exclusive with thread)" },
-          thread: {
-            type: "array",
-            items: { type: "string" },
-            description: "Array of tweet texts for a thread (mutually exclusive with text)",
-          },
-          image: { type: "string", description: "Absolute path to an image file to attach to the first tweet" },
-        },
+        text: z.string().optional().describe("Single tweet text (mutually exclusive with thread)"),
+        thread: z.array(z.string()).optional().describe("Array of tweet texts for a thread (mutually exclusive with text)"),
+        image: z.string().optional().describe("Absolute path to an image file to attach to the first tweet"),
       },
     },
     async (args) => {
@@ -315,20 +310,10 @@ export async function startServer() {
     {
       description: "Publish an X post or thread. Re-validates and recomputes cost server-side. Requires a valid confirm_nonce from preview_post (when elicitation not supported by client).",
       inputSchema: {
-        type: "object",
-        properties: {
-          text: { type: "string", description: "Single tweet text (mutually exclusive with thread)" },
-          thread: {
-            type: "array",
-            items: { type: "string" },
-            description: "Array of tweet texts for a thread (mutually exclusive with text)",
-          },
-          image: { type: "string", description: "Absolute path to an image file to attach to the first tweet" },
-          confirm_nonce: {
-            type: "string",
-            description: "Nonce issued by preview_post for the SAME payload. Required when client does not support elicitation.",
-          },
-        },
+        text: z.string().optional().describe("Single tweet text (mutually exclusive with thread)"),
+        thread: z.array(z.string()).optional().describe("Array of tweet texts for a thread (mutually exclusive with text)"),
+        image: z.string().optional().describe("Absolute path to an image file to attach to the first tweet"),
+        confirm_nonce: z.string().optional().describe("Nonce issued by preview_post for the SAME payload. Required when client does not support elicitation."),
       },
     },
     async (args, ctx) => {
@@ -372,7 +357,7 @@ export async function startServer() {
     "auth_instructions",
     {
       description: "Returns the steps and command to mint an X OAuth 2.0 refresh token for use with this MCP server.",
-      inputSchema: { type: "object", properties: {} },
+      inputSchema: {},
     },
     async () => {
       const result = await nonceTools.auth_instructions.handler();

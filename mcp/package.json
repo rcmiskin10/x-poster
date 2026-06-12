@@ -4,6 +4,6 @@
   "private": true,
   "type": "module",
   "bin": { "x-poster-mcp": "./server.mjs" },
-  "dependencies": { "@modelcontextprotocol/sdk": "1.29.0" },
+  "dependencies": { "@modelcontextprotocol/sdk": "1.29.0", "zod": "4.4.3" },
   "engines": { "node": ">=20" }
 }

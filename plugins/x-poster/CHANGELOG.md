@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1
+- Fix: the MCP server crashed at startup ("inputSchema must be a Zod schema or raw shape"),
+  surfacing in clients as `MCP error -32000: Connection closed`. `registerTool` was passed plain
+  JSON Schema objects, which `@modelcontextprotocol/sdk` 1.29 rejects — tool inputs are now zod
+  raw shapes (`zod` added as an explicit pinned dependency). Caught by a new live stdio handshake
+  test (`mcp/_tests/stdio.test.mjs`); the prior tests exercised handlers directly and never hit
+  the registration layer.
+
 ## 1.2.0
 - Add an **MCP server** so x-poster works as a Claude Desktop connector and directly inside Claude
   Code, alongside the existing `/x-poster:x-post` CLI command. Two tools with a safety gate:
