@@ -27,17 +27,28 @@ protocol level:
   Authorize on X, done. No terminal, no scripts.
 - **`auth_instructions`** — setup help (the X-app checklist and auth options).
 
-Cost: ~$0.015/post, ~$0.20/post-with-URL (X pay-per-use, billed to your own X app).
+Cost: ~$0.015/post, ~$0.20/post-with-URL — X pay-per-use, billed to your own X app (set daily and
+monthly caps in the X developer portal). Drafting is covered by your Claude subscription.
 
 ---
 
-## Why it's basically free
+## What it costs
 
-x-poster doesn't run its own AI. The drafting happens inside *your* Claude Code session, so it's
-covered by the Claude subscription you already pay for. The plugin itself calls no API and costs you
-nothing. The only charge is X's own pay-per-use posting (~$0.015 a post), billed to your own X app.
+Two sides to the bill — one you already pay, one is small but real:
 
-You bring: a Claude Code subscription you already have, and a free X developer app. That's it.
+- **The AI side: covered by your Claude subscription.** x-poster doesn't run its own AI. Drafting
+  happens inside *your* Claude Code session, so it's covered by the Claude subscription you already
+  pay for — no separate AI API billing.
+- **The posting side: X pay-per-use, billed to your own X app.** Roughly **$0.015 (about a cent and
+  a half) per post**, and **~$0.20 per post that contains a URL**. This is X's pricing, not ours —
+  you bring your own X developer app and the charges go straight to it. Every post shows you its
+  estimated cost *before* you confirm, and with no credentials the poster cannot spend at all.
+- **Set spending caps.** In the X developer portal you can set **daily and monthly spend limits**
+  on your app, so a runaway bill is structurally impossible.
+
+The software itself is open source (MIT) — no service fee, no hosted middleman.
+
+You bring: a Claude Code subscription you already have, and your own pay-per-use X developer app.
 
 ## What it does
 
@@ -62,12 +73,14 @@ in the terminal, this is for you.
 
 Three steps, all in your browser and Claude. This is the recommended path for everyone.
 
-### Step 1 — Create your (free) X app
+### Step 1 — Create your X app
 
-This is the only fiddly part, and it's a one-time copy-paste exercise:
+This is the only fiddly part, and it's a one-time copy-paste exercise. Signing up costs nothing;
+posting bills your app pay-per-use (~$0.015/post — see [What it costs](#what-it-costs)).
 
 1. Go to [developer.x.com](https://developer.x.com), sign in with your X account, and create a
-   Project + App (the free tier is fine).
+   Project + App on the pay-per-use plan. While you're there, set **daily and monthly spend caps**
+   on the app so your bill has a hard ceiling.
 2. Open your app's **User authentication settings** → **Edit** and enter exactly:
 
    | Setting | Value |
@@ -184,8 +197,8 @@ resolution order for the state file is:
 - The `X_REFRESH_TOKEN` value you enter at install time (keychain) or in your env file is a
   **one-time seed**. After the first post, the live token lives in the state file — not the keychain
   or the env file.
-- **If you delete or lose the state file, you must re-mint your refresh token** by re-running
-  `bin/x-auth.mjs` and updating `X_REFRESH_TOKEN` in your env / keychain.
+- **If you delete or lose the state file, just re-connect**: run the `authorize` tool again (or
+  re-run `bin/x-auth.mjs` and update `X_REFRESH_TOKEN` in your env / keychain).
 - **Do not run two posting sessions against the same seed concurrently.** The second post will burn
   the same token the first just rotated away, causing a 401.
 
@@ -194,7 +207,8 @@ resolution order for the state file is:
 ## What it is NOT
 
 - Not an autoposter. There is no "post while I sleep" mode, by design. The human gate is the point,
-  and it's also what keeps it free (an always-on version would bill the API, not your subscription).
+  and it's also what keeps the AI side on your Claude subscription (an always-on version would bill
+  the Claude API on top of X's per-post charges).
 - Not a growth-hack bot. One thought, one confirmation, one post.
 - Not a hosted service. It runs on your machine, with your keys, on your subscription.
 

@@ -1,64 +1,60 @@
 ---
 description: "Draft (or take) a tweet/thread, optionally attach an image, score it against a built-in bookmarkability rubric, preview the cost, and post to X — ONLY after you explicitly confirm. Never auto-publishes. X pay-per-use (~$0.015/post, ~$0.20/post-with-URL)."
-argument-hint: "<text to post | 'draft a post about X'> [--image <path>]"
-allowed-tools: ["Bash", "Read"]
+argument-hint: "<text to post | 'draft a post about X'> [--image <path>] [--reply-to <tweet-id>]"
+allowed-tools: ["Read", "Bash", "mcp__x-poster__preview_post", "mcp__x-poster__publish_post", "mcp__x-poster__authorize", "mcp__x-poster__auth_instructions"]
 ---
 
 # /x-poster:x-post
 
-Turn `$ARGUMENTS` into an X post, gate it, and (only on your explicit OK) post it via the bundled
-`x-post.mjs`.
+Turn `$ARGUMENTS` into an X post via the x-poster MCP tools. Announce each step with its
+one-line emoji status so the user always knows where the workflow is.
 
-> ⛔ **HARD GATE — never auto-publish.** You MUST present the draft and get an explicit, affirmative
-> confirmation ("ship it") in this conversation before any real post. There is no bypass. The bundled
-> `x-post.mjs` independently refuses to post without `--confirm` + credentials — that is the backstop,
-> not the gate. The gate is you showing the draft and the human approving it.
+> ⛔ **HARD GATE — never auto-publish.** Present the preview and get an explicit, affirmative
+> confirmation ("ship it") in this conversation before calling `publish_post`. No bypass.
+> The server's nonce/elicitation check is the backstop, not the gate.
 
-## Prerequisites (one-time, see README)
-- The user has their own X app creds in a writable env file and has minted `X_REFRESH_TOKEN` via
-  `x-auth.mjs`.
-- **Resolving the env-file path.** Every command below sets `ENV_FILE` from, in priority order:
-  the plugin config (`$CLAUDE_PLUGIN_OPTION_ENV_FILE`, set via `/plugin configure x-poster` or
-  `--config env_file=...` at install), then the `$X_ENV_FILE` environment variable. If BOTH are
-  empty, ask the user for the path. The shell snippet `ENV_FILE="${CLAUDE_PLUGIN_OPTION_ENV_FILE:-$X_ENV_FILE}"`
-  does this; the commands persist rotated tokens back to that same file.
+## Step 0 — route (decide deterministically, announce it)
 
-## What this command does
+- `$ARGUMENTS` contains final text (quoted, or "post this …") → `📋 route: fast — verbatim text, skipping draft + rubric`
+- `$ARGUMENTS` is an instruction ("draft a post about …") → `📋 route: draft`
 
-1. **Resolve the input.** `$ARGUMENTS` is either text to post directly, or an instruction to draft
-   ("draft a post about …"). If a `--image <path>` is present (or the user references an image),
-   resolve it to an absolute path and **Read it to confirm it contains nothing the user wouldn't want
-   public** before proceeding. Only one image; it attaches to the first tweet.
+LLM work happens ONLY on the draft route (and the image screen). Everything else is plumbing —
+do not editorialize, score, or reformat on the fast route.
 
-2. **Draft / refine (skip if the user gave final text).** Produce a single tweet or a linear thread
-   (each tweet ≤280 chars). Score against `${CLAUDE_PLUGIN_ROOT}/config/rubric.md` (aim ≥4/5). If the
-   user set `AVOID_SLOP_PATH`, also check that file's rules. If `VOICE_CONFIG_PATH` is set, read it and
-   match that voice; otherwise write plainly in the user's own words — do not invent a persona.
-   Per X's ranking, keep links OUT of the main post (put them in a reply).
+## Steps
 
-3. **Cost + validation (dry-run, posts nothing):**
-   ```bash
-   ENV_FILE="${CLAUDE_PLUGIN_OPTION_ENV_FILE:-$X_ENV_FILE}"
-   node --env-file="$ENV_FILE" "${CLAUDE_PLUGIN_ROOT}/bin/x-post.mjs" \
-     --dry-run [--image <abs-path>] --thread "<tweet 1>" "<tweet 2>" ...
-   ```
-   (Use `--text "<tweet>"` for a single post.) Surface `estimatedCostUsd`, `hasImage`, and any `errors`.
+1. `📝 resolve` — extract the text/thread, reply target (`--reply-to` or "reply to <id>"), and
+   image path. If an image is given: Read it and confirm it contains nothing the user wouldn't
+   want public. One image max; it attaches to the first tweet.
 
-4. **PRESENT + STOP.** Show the full draft (each tweet), the rubric score, whether an image is
-   attached, and the estimated cost. Ask: **"Reply 'ship it' to post, or tell me what to change."**
-   Do not proceed until the human affirmatively confirms.
+2. `✍️ draft` — **draft route only.** Single tweet or linear thread, each ≤280 chars. Score
+   against `${CLAUDE_PLUGIN_ROOT}/config/rubric.md` (aim ≥4/5); honor `AVOID_SLOP_PATH` and
+   `VOICE_CONFIG_PATH` if set, otherwise write plainly in the user's own words. Keep links OUT
+   of the main post (put them in a reply).
 
-5. **Post (only on confirmation).** Pass the resolved path as `X_ENV_FILE` too, so the rotated refresh
-   token is persisted back to it:
-   ```bash
-   ENV_FILE="${CLAUDE_PLUGIN_OPTION_ENV_FILE:-$X_ENV_FILE}"
-   X_ENV_FILE="$ENV_FILE" node --env-file="$ENV_FILE" "${CLAUDE_PLUGIN_ROOT}/bin/x-post.mjs" \
-     --confirm [--image <abs-path>] --thread "<tweet 1>" "<tweet 2>" ...
-   ```
-   Report the live URL(s) it returns. If creds are absent, say so and stop at the dry-run.
+3. `🔍 preview` — call `preview_post` (with `in_reply_to` for replies). **Relay its `render`
+   block to the user VERBATIM — do not reformat it.** If `errors` is non-empty, stop and fix.
+
+4. `🚦 gate` — STOP. Wait for an explicit affirmative ("ship it"). Anything else is feedback:
+   apply it and re-preview (the nonce is payload-bound — any change needs a fresh preview).
+
+5. `🚀 publish` — call `publish_post` with the SAME payload + the `confirm_nonce` from step 3.
+   Relay its `render` block verbatim.
+
+If a tool fails with "not connected", run `authorize`, present the link, then resume at step 3.
+
+## Fallback — MCP server unavailable
+
+Use the bundled CLI: `node --env-file="$ENV_FILE" "${CLAUDE_PLUGIN_ROOT}/bin/x-post.mjs" --dry-run …`
+to preview, then `--confirm` to post (after the same gate), where
+`ENV_FILE="${CLAUDE_PLUGIN_OPTION_ENV_FILE:-$X_ENV_FILE}"` and `X_ENV_FILE="$ENV_FILE"` is also
+exported on the posting call so rotated tokens persist. Flags: `--text "<tweet>"` or
+`--thread "<t1>" "<t2>" …`, `--image <abs-path>`. Same gate, same rules. (Replies are
+MCP-only — the CLI has no `--reply-to`.)
 
 ## Guardrails
+
 - Never post without step 4's explicit confirmation.
-- Always show the cost before posting (real money: ~$0.015/post, ~$0.20/post-with-URL).
-- Image upload needs the `media.write` scope on the token; if it 403s, the user must enable it on
-  their X app and re-mint via `x-auth.mjs`. Pre-flight with `--upload-only <image>` (no post, no cost).
+- Always surface the cost before posting (real money: ~$0.015/post, ~$0.20/post-with-URL).
+- Image upload needs the `media.write` scope; on 403, the user must enable it on their X app
+  and re-run `authorize`.

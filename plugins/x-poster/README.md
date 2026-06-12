@@ -92,7 +92,10 @@ The configured value takes priority; the env var is the fallback.
 It drafts, scores against the built-in rubric, **dry-runs the cost**, then asks **"ship it?"** —
 nothing posts until you confirm. Rotated refresh tokens are written back to your env file automatically.
 
-**Cost:** X pay-per-use, ~$0.015/post, ~$0.20/post-with-URL.
+**Cost:** X pay-per-use, billed to your own X app — ~$0.015 (about a cent and a half) per post,
+~$0.20 per post containing a URL. Set **daily and monthly spend caps** in the X developer portal
+for a hard ceiling. Drafting costs nothing extra — it runs on the Claude subscription you
+already have.
 
 ### Optional
 - `VOICE_CONFIG_PATH=/path/to/voice.md` — match your own voice file when drafting.

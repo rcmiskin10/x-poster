@@ -50,20 +50,21 @@ export function loadEnvFile(path) {
 // ---------------------------------------------------------------------------
 
 function makeNonceFns(secret) {
-  // Order-preserving canonical form of the normalized payload.
-  function canonical(tweets, image) {
-    return JSON.stringify({ tweets, image: image || null });
+  // Order-preserving canonical form of the normalized payload. in_reply_to is
+  // bound so a reply nonce can't be replayed as a standalone post (or vice versa).
+  function canonical(tweets, image, inReplyTo) {
+    return JSON.stringify({ tweets, image: image || null, in_reply_to: inReplyTo || null });
   }
 
-  function mintNonce(tweets, image) {
+  function mintNonce(tweets, image, inReplyTo) {
     const ts = Date.now();
-    const payload = canonical(tweets, image);
+    const payload = canonical(tweets, image, inReplyTo);
     const sig = createHmac("sha256", secret).update(`${payload}.${ts}`).digest("hex");
     const hash = createHmac("sha256", secret).update(payload).digest("hex");
     return `${hash}.${ts}.${sig}`;
   }
 
-  function verifyNonce(nonce, tweets, image) {
+  function verifyNonce(nonce, tweets, image, inReplyTo) {
     if (!nonce || typeof nonce !== "string") return false;
     const parts = nonce.split(".");
     // Format: payloadHash.ts.sig — sig (64-char hex) last, ts second-to-last, payloadHash everything before.
@@ -75,7 +76,7 @@ function makeNonceFns(secret) {
     if (isNaN(ts)) return false;
     if (Date.now() - ts >= 600_000) return false; // 10-min TTL
 
-    const payload = canonical(tweets, image);
+    const payload = canonical(tweets, image, inReplyTo);
     const expectedHash = createHmac("sha256", secret).update(payload).digest("hex");
     const expectedSig = createHmac("sha256", secret).update(`${payload}.${ts}`).digest("hex");
 
@@ -110,6 +111,46 @@ function normalize({ text, thread }) {
 }
 
 // ---------------------------------------------------------------------------
+// renderDashboard — preformatted step-tracker block for tool responses.
+// Clients relay it VERBATIM, so the workflow display is deterministic and
+// identical across sessions — the model never reformats preview data.
+// stage: "preview" | "published"
+// ---------------------------------------------------------------------------
+
+export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasImage, inReplyTo, errors = [], urls = [] }) {
+  const isThread = tweets.length > 1;
+  const kind = isThread ? `thread ×${tweets.length}` : "post";
+  const header = `🐦 x-poster ▸ ${kind}${inReplyTo ? ` ▸ reply → ${inReplyTo}` : ""}`;
+
+  const rule = "─".repeat(44);
+  const body = tweets.map((t, i) => `${i + 1}│ ${t}`).join("\n");
+
+  const ok = errors.length === 0;
+  const steps =
+    stage === "published" ? "✅ resolve   ✅ validate   ✅ gate   ✅ publish"
+    : ok                  ? "✅ resolve   ✅ validate   🟡 gate   ⚪ publish"
+    :                       "✅ resolve   ❌ validate   ⚪ gate   ⚪ publish";
+
+  const chars = perPost.reduce((n, p) => n + p.chars, 0);
+  const hasUrl = perPost.some((p) => p.hasUrl);
+  const stats = `📝 ${tweets.length} tweet${isThread ? "s" : ""} · ${chars} chars · ${hasImage ? "🖼 image" : "🖼 none"} · ${hasUrl ? "🔗 url" : "🔗 none"}`;
+  const cost = stage === "published"
+    ? `💸 $${estimatedCostUsd.toFixed(3)} charged`
+    : `💸 est. $${estimatedCostUsd.toFixed(3)}`;
+
+  const lines = [header, rule, body, rule, steps, stats, cost];
+  if (stage === "published") {
+    for (const u of urls) lines.push(`🚀 live: ${u}`);
+  } else if (ok) {
+    lines.push(`🚦 awaiting explicit confirmation — reply "ship it" to publish`);
+  } else {
+    for (const e of errors) lines.push(`⚠️ ${e}`);
+    lines.push("⛔ fix validation errors, then preview again");
+  }
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // makeTools — pure factory; no SDK, no network required
 // deps = { postThread, statePath, elicit? }
 //   postThread(tweets, image?) → ids[]   (injected; may be mock)
@@ -130,10 +171,10 @@ export function makeTools(deps) {
   // -------------------------------------------------------------------------
   // preview_post — PURE, zero network
   // -------------------------------------------------------------------------
-  async function previewHandler({ text, thread, image }) {
+  async function previewHandler({ text, thread, image, in_reply_to }) {
     const tweets = normalize({ text, thread });
     const plan = buildPlan({ tweets, dryRun: true, image: image || null });
-    const confirm_nonce = mintNonce(tweets, image || null);
+    const confirm_nonce = mintNonce(tweets, image || null, in_reply_to || null);
     return {
       tweets: plan.tweets,
       perPost: plan.perPost,
@@ -142,13 +183,22 @@ export function makeTools(deps) {
       hasImage: plan.hasImage,
       errors: plan.errors,
       confirm_nonce,
+      render: renderDashboard({
+        stage: "preview",
+        tweets: plan.tweets,
+        perPost: plan.perPost,
+        estimatedCostUsd: plan.estimatedCostUsd,
+        hasImage: plan.hasImage,
+        inReplyTo: in_reply_to || null,
+        errors: plan.errors,
+      }),
     };
   }
 
   // -------------------------------------------------------------------------
   // publish_post — the ONLY writer
   // -------------------------------------------------------------------------
-  async function publishHandler({ text, thread, image, confirm_nonce }) {
+  async function publishHandler({ text, thread, image, confirm_nonce, in_reply_to }) {
     const tweets = normalize({ text, thread });
     if (tweets.length === 0 || tweets.every(t => !t || !t.trim())) {
       throw new Error("no tweets: text is empty");
@@ -160,19 +210,32 @@ export function makeTools(deps) {
 
     // Confirmation gate
     if (typeof elicit === "function") {
-      const rendered = tweets.join("\n---\n");
+      const reply = in_reply_to ? `\n\n(reply to tweet ${in_reply_to})` : "";
+      const rendered = tweets.join("\n---\n") + reply;
       const approved = await elicit({ rendered, costUsd: plan.estimatedCostUsd });
       if (!approved) throw new Error("user declined");
     } else {
-      if (!verifyNonce(confirm_nonce, tweets, image || null)) {
+      if (!verifyNonce(confirm_nonce, tweets, image || null, in_reply_to || null)) {
         throw new Error("missing/invalid confirm_nonce — call preview_post first to get a nonce");
       }
     }
 
     // Post via injected postThread
-    const ids = await injectedPostThread(tweets, image || null);
+    const ids = await injectedPostThread(tweets, image || null, in_reply_to || null);
     const urls = ids.map(id => `https://x.com/i/web/status/${id}`);
-    return { posted: ids, urls };
+    return {
+      posted: ids,
+      urls,
+      render: renderDashboard({
+        stage: "published",
+        tweets,
+        perPost: plan.perPost,
+        estimatedCostUsd: plan.estimatedCostUsd,
+        hasImage: plan.hasImage,
+        inReplyTo: in_reply_to || null,
+        urls,
+      }),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -225,7 +288,7 @@ export function makeTools(deps) {
 let _postChain = Promise.resolve();
 
 export function makePostAdapter({ tokenStore, corePostThread, clientId, clientSecret }) {
-  return (tweets, image) => {
+  return (tweets, image, inReplyTo) => {
     // Fail with the FIX, not the symptom: a fresh install has no refresh token
     // yet, and the cure is one authorize call — not an opaque OAuth 400.
     try {
@@ -242,6 +305,7 @@ export function makePostAdapter({ tokenStore, corePostThread, clientId, clientSe
         { clientId, clientSecret, refreshToken: tokenStore.current() },
         (newToken) => tokenStore.persist(newToken),
         image || null,
+        inReplyTo || null,
       )
     );
     // Keep the chain alive whether this call succeeds or errors.
@@ -310,11 +374,12 @@ export async function startServer() {
   server.registerTool(
     "preview_post",
     {
-      description: "Preview an X post or thread. Returns cost estimate and a confirm_nonce for publish_post. PURE — no network I/O.",
+      description: "Preview an X post or thread. Returns cost estimate, a confirm_nonce for publish_post, and a `render` dashboard block — show `render` to the user VERBATIM (do not reformat). PURE — no network I/O.",
       inputSchema: {
         text: z.string().optional().describe("Single tweet text (mutually exclusive with thread)"),
         thread: z.array(z.string()).optional().describe("Array of tweet texts for a thread (mutually exclusive with text)"),
         image: z.string().optional().describe("Absolute path to an image file to attach to the first tweet"),
+        in_reply_to: z.string().optional().describe("Existing tweet ID to reply to — the post (or first tweet of a thread) becomes a reply to it"),
       },
     },
     async (args) => {
@@ -326,11 +391,12 @@ export async function startServer() {
   server.registerTool(
     "publish_post",
     {
-      description: "Publish an X post or thread. Re-validates and recomputes cost server-side. Requires a valid confirm_nonce from preview_post (when elicitation not supported by client).",
+      description: "Publish an X post or thread. Re-validates and recomputes cost server-side. Requires a valid confirm_nonce from preview_post (when elicitation not supported by client). Returns a `render` dashboard block — show it to the user VERBATIM.",
       inputSchema: {
         text: z.string().optional().describe("Single tweet text (mutually exclusive with thread)"),
         thread: z.array(z.string()).optional().describe("Array of tweet texts for a thread (mutually exclusive with text)"),
         image: z.string().optional().describe("Absolute path to an image file to attach to the first tweet"),
+        in_reply_to: z.string().optional().describe("Existing tweet ID to reply to — must match the in_reply_to passed to preview_post (the nonce is bound to it)"),
         confirm_nonce: z.string().optional().describe("Nonce issued by preview_post for the SAME payload. Required when client does not support elicitation."),
       },
     },

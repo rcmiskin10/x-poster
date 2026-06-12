@@ -139,12 +139,14 @@ async function postOne(accessToken, text, inReplyToId, mediaIds) {
   throw new Error("post failed: rate-limited after retries");
 }
 
-export async function postThread(tweets, creds, onRotatedToken, imagePath) {
+// inReplyToId (optional): an existing tweet id the root tweet replies to. The
+// rest of the thread chains off the root as usual. null/undefined = new post.
+export async function postThread(tweets, creds, onRotatedToken, imagePath, inReplyToId) {
   const accessToken = await refreshAccessToken(creds, onRotatedToken);
   let mediaIds;
   if (imagePath) mediaIds = [await uploadMedia(accessToken, imagePath)];
   const ids = [];
-  let replyTo = null;
+  let replyTo = inReplyToId || null;
   for (let i = 0; i < tweets.length; i++) {
     // Attach the image to the FIRST tweet only.
     const id = await postOne(accessToken, tweets[i], replyTo, i === 0 ? mediaIds : undefined);

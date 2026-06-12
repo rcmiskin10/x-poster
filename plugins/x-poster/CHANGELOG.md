@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.0
+- **Deterministic step dashboard.** `preview_post` and `publish_post` now return a `render`
+  block — a server-formatted emoji step tracker (resolve → validate → gate → publish) with the
+  draft, char counts, cost, and (after posting) live URLs. Clients relay it verbatim, so the
+  workflow display is identical every run and the model never reformats preview data.
+- **MCP-first `/x-post` command.** The slash command routes through the MCP tools instead of
+  the bundled CLI; the CLI remains as a documented fallback. New deterministic route rule:
+  verbatim text takes a fast path (no drafting, no rubric — straight to preview), and LLM work
+  happens only on the draft route. Each step announces itself with a one-line emoji status.
+- Replies (`in_reply_to`) documented as MCP-only; the CLI has no `--reply-to` flag.
+
 ## 1.3.0
 - **No-terminal setup: new `authorize` MCP tool.** Connecting your X account no longer requires
   cloning the repo, creating an env file, or running `bin/x-auth.mjs`. Ask Claude to authorize,
