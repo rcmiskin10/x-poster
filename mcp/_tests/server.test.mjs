@@ -1,8 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeTools } from "../server.mjs";
+import { makeTools, resolveAuthPort } from "../server.mjs";
 
 const noNet = () => { throw new Error("network called during preview!"); };
+
+test("resolveAuthPort: blank/invalid → 8723 default; explicit values honored", () => {
+  assert.equal(resolveAuthPort(undefined), 8723);
+  assert.equal(resolveAuthPort(""), 8723);        // an UNSET optional .mcpb config field
+  assert.equal(resolveAuthPort("   "), 8723);
+  assert.equal(resolveAuthPort("abc"), 8723);
+  assert.equal(resolveAuthPort("99999"), 8723);   // out of port range
+  assert.equal(resolveAuthPort("0"), 0);          // tests bind an ephemeral port
+  assert.equal(resolveAuthPort("9000"), 9000);
+  assert.equal(resolveAuthPort(9000), 9000);      // tolerate a numeric too
+});
 
 test("preview_post performs zero network I/O and returns cost", async () => {
   const tools = makeTools({ postThread: noNet, refreshAccessToken: noNet, statePath: "/tmp/none", seed: "S" });

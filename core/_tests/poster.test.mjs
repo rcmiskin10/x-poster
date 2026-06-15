@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { containsUrl, postCost, costEstimate, buildPlan, persistRefreshToken, mediaTypeForPath } from "../poster.mjs";
+import { containsUrl, postCost, costEstimate, buildPlan, persistRefreshToken, mediaTypeForPath, imageSizeError, IMAGE_MAX_BYTES } from "../poster.mjs";
 
 test("containsUrl detects links and bare domains, not plain text", () => {
   assert.equal(containsUrl("just a normal tweet about shipping"), false);
@@ -79,6 +79,20 @@ test("mediaTypeForPath: maps common image extensions", () => {
   assert.equal(mediaTypeForPath("y.gif"), "image/gif");
   assert.equal(mediaTypeForPath("z.webp"), "image/webp");
   assert.equal(mediaTypeForPath("noext"), "application/octet-stream");
+});
+
+test("imageSizeError: flags oversized images with a friendly, actionable message", () => {
+  // Under the limit → no error.
+  assert.equal(imageSizeError(1 * 1024 * 1024, "image/png"), null);
+  assert.equal(imageSizeError(IMAGE_MAX_BYTES.default, "image/jpeg"), null); // exactly at limit is OK
+  // Over the static-image limit → friendly message naming the limit and a way out.
+  const err = imageSizeError(6 * 1024 * 1024, "image/png");
+  assert.match(err, /too large|over/i);
+  assert.match(err, /5 MB/);
+  assert.match(err, /resize|compress|without the image/i);
+  // GIFs get the higher limit.
+  assert.equal(imageSizeError(10 * 1024 * 1024, "image/gif"), null);
+  assert.match(imageSizeError(20 * 1024 * 1024, "image/gif"), /15 MB/);
 });
 
 test("buildPlan: image presence + missing-image validation", () => {

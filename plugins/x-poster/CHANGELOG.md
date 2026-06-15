@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.4.1
+- **Fix the most common install failure: `X_AUTH_PORT` is now configurable from the `.mcpb` install
+  dialog.** If port 8723 was already in use, Desktop/connector users had no GUI way to change it.
+  It's now an optional install field (default 8723) with a note that you must register the matching
+  `http://127.0.0.1:<port>/callback` in your X app. Hardened the port parsing so a blank value
+  (what an unset optional field injects) correctly falls back to 8723 instead of binding a random
+  port — which would have silently broken the authorize callback.
+- **Friendlier oversized-image error.** Attaching an image over X's limit (5 MB photos / 15 MB GIF)
+  now fails before upload with "image is too large… resize or compress it, or post without the
+  image" instead of an opaque HTTP 400.
+- **Install dialog reminds you to authorize.** The Client ID field now says to ask Claude to
+  "authorize x-poster" after installing.
+- Tests: blank-string credential normalization and the missing-creds fast-fail are now covered at
+  the live-process level (the server exits with an actionable message, never an opaque crash).
+
 ## 1.4.0
 - **Deterministic step dashboard.** `preview_post` and `publish_post` now return a `render`
   block — a server-formatted emoji step tracker (resolve → validate → gate → publish) with the

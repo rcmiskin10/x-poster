@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "x-poster",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Post a tweet or thread (with optional image) to X. Preview cost first; never auto-publishes.",
   "author": { "name": "rcmisk" },
   "license": "MIT",
@@ -14,7 +14,8 @@
       "env": {
         "X_CLIENT_ID": "${user_config.X_CLIENT_ID}",
         "X_CLIENT_SECRET": "${user_config.X_CLIENT_SECRET}",
-        "X_REFRESH_TOKEN": "${user_config.X_REFRESH_TOKEN}"
+        "X_REFRESH_TOKEN": "${user_config.X_REFRESH_TOKEN}",
+        "X_AUTH_PORT": "${user_config.X_AUTH_PORT}"
       }
     }
   },
@@ -28,7 +29,7 @@
     "X_CLIENT_ID": {
       "type": "string",
       "title": "X API Client ID",
-      "description": "OAuth2 client ID from your X Developer App",
+      "description": "OAuth2 client ID from your X Developer App. After installing, ask Claude to \"authorize x-poster\" and click the link to connect your account.",
       "sensitive": true,
       "required": true
     },
@@ -44,6 +45,12 @@
       "title": "X Refresh Token (optional)",
       "description": "Leave blank — after installing, just ask Claude to run the authorize tool and click the link. (Power users: paste a token minted via bin/x-auth.mjs instead.)",
       "sensitive": true,
+      "required": false
+    },
+    "X_AUTH_PORT": {
+      "type": "string",
+      "title": "Authorize callback port (optional)",
+      "description": "Leave blank to use 8723. Only change this if port 8723 is already in use on your machine — and if you do, register http://127.0.0.1:<this-port>/callback as the callback URL in your X app, or the authorize step will fail.",
       "required": false
     }
   }

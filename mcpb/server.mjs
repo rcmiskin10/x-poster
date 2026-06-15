@@ -96,6 +96,21 @@ function makeNonceFns(secret) {
 }
 
 // ---------------------------------------------------------------------------
+// resolveAuthPort — the authorize callback port.
+// An UNSET optional .mcpb user_config field arrives as "" (not undefined), and
+// Number("") is 0 → an ephemeral port → a callback URL that won't match the
+// http://127.0.0.1:8723/callback registered in the X app. So treat blank/invalid
+// as the 8723 default. An explicit "0" is honored (tests bind an ephemeral port).
+// ---------------------------------------------------------------------------
+
+export function resolveAuthPort(raw) {
+  const v = (raw ?? "").toString().trim();
+  if (v === "") return 8723;
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : 8723;
+}
+
+// ---------------------------------------------------------------------------
 // normalize: text|thread → tweets[], error if both or neither
 // ---------------------------------------------------------------------------
 
@@ -464,7 +479,7 @@ export async function startServer() {
     async () => {
       activeAuthSession?.close();
       activeAuthSession = null;
-      const port = Number(process.env.X_AUTH_PORT ?? 8723);
+      const port = resolveAuthPort(process.env.X_AUTH_PORT);
       let session;
       try {
         session = await startAuthSession({

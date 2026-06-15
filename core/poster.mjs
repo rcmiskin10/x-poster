@@ -14,6 +14,20 @@ export const PRICE_PER_POST_WITH_URL = 0.20;
 export const API_BASE = "https://api.x.com";
 export const MEDIA_UPLOAD_URL = `${API_BASE}/2/media/upload`;
 
+// X's media size caps (docs.x.com): 5 MB for static images, 15 MB for GIF.
+export const IMAGE_MAX_BYTES = { "image/gif": 15 * 1024 * 1024, default: 5 * 1024 * 1024 };
+
+// Pre-flight size check so an oversized image fails with a clear, actionable
+// message instead of an opaque 400 after a wasteful full-file base64 upload.
+// Returns an error string, or null if the file is within X's limit.
+export function imageSizeError(byteLength, mediaType) {
+  const limit = IMAGE_MAX_BYTES[mediaType] ?? IMAGE_MAX_BYTES.default;
+  if (byteLength <= limit) return null;
+  const mb = (n) => (n / 1024 / 1024).toFixed(1).replace(/\.0$/, "");
+  return `image is too large (${mb(byteLength)} MB, over X's ${mb(limit)} MB limit). ` +
+    `Resize or compress it, or post without the image.`;
+}
+
 // Conservative URL detector — X shortens any link, so we flag bare domains too (worst-case cost).
 export const URL_RE =
   /(https?:\/\/|www\.|\b[a-z0-9-]+\.(?:com|io|app|dev|org|net|co|ai|gg|sh|xyz)\b)/i;
@@ -100,13 +114,16 @@ export function mediaTypeForPath(p) {
 // (media.write scope required, or this 403s.) Good for screenshots; large/video would need chunked.
 export async function uploadMedia(accessToken, filePath) {
   const bytes = readFileSync(filePath);
+  const mediaType = mediaTypeForPath(filePath);
+  const sizeErr = imageSizeError(bytes.length, mediaType);
+  if (sizeErr) throw new Error(`media upload failed: ${sizeErr}`);
   const res = await fetch(MEDIA_UPLOAD_URL, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       media: bytes.toString("base64"),
       media_category: "tweet_image",
-      media_type: mediaTypeForPath(filePath),
+      media_type: mediaType,
     }),
   });
   if (!res.ok) throw new Error(`media upload failed: ${res.status} ${await res.text()}`);

@@ -105,3 +105,39 @@ test("server completes an MCP stdio handshake and lists all four tools", async (
     child.kill();
   }
 });
+
+test("server with no client credentials exits fast with an actionable fatal message", async () => {
+  const child = spawn(process.execPath, [serverPath], {
+    // No X_CLIENT_ID / X_CLIENT_SECRET, and no X_ENV_FILE to read them from:
+    // a fresh install with nothing configured. The server must fail BEFORE the
+    // handshake with a message that names the fix, not an opaque crash.
+    env: { HOME: process.env.HOME, PATH: process.env.PATH, X_ENV_FILE: "" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  let stderr = "";
+  child.stderr.on("data", (d) => (stderr += d));
+
+  const exitCode = await new Promise((resolve) => child.on("exit", resolve));
+  assert.notEqual(exitCode, 0, "must exit non-zero when creds are missing");
+  assert.match(stderr, /missing X_CLIENT_ID\/X_CLIENT_SECRET/, "fatal message names the missing vars");
+  assert.match(stderr, /\.mcpb|X_ENV_FILE|auth_instructions/, "fatal message points at how to fix it");
+});
+
+test("blank-string credentials are treated as missing (normalized), not accepted", async () => {
+  const child = spawn(process.execPath, [serverPath], {
+    // Empty strings are exactly what an unset .mcpb user_config field injects.
+    env: {
+      HOME: process.env.HOME, PATH: process.env.PATH,
+      X_CLIENT_ID: "   ", X_CLIENT_SECRET: "", X_ENV_FILE: "",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  let stderr = "";
+  child.stderr.on("data", (d) => (stderr += d));
+
+  const exitCode = await new Promise((resolve) => child.on("exit", resolve));
+  assert.notEqual(exitCode, 0, "blank creds must not be accepted as real");
+  assert.match(stderr, /missing X_CLIENT_ID\/X_CLIENT_SECRET/);
+});
