@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "x-poster",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Post a tweet or thread (with optional image) to X. Preview cost first; never auto-publishes.",
   "author": { "name": "rcmisk" },
   "license": "MIT",
@@ -15,7 +15,8 @@
         "X_CLIENT_ID": "${user_config.X_CLIENT_ID}",
         "X_CLIENT_SECRET": "${user_config.X_CLIENT_SECRET}",
         "X_REFRESH_TOKEN": "${user_config.X_REFRESH_TOKEN}",
-        "X_AUTH_PORT": "${user_config.X_AUTH_PORT}"
+        "X_AUTH_PORT": "${user_config.X_AUTH_PORT}",
+        "X_MAX_TWEET_CHARS": "${user_config.X_MAX_TWEET_CHARS}"
       }
     }
   },
@@ -51,6 +52,12 @@
       "type": "string",
       "title": "Authorize callback port (optional)",
       "description": "Leave blank to use 8723. Only change this if port 8723 is already in use on your machine — and if you do, register http://127.0.0.1:<this-port>/callback as the callback URL in your X app, or the authorize step will fail.",
+      "required": false
+    },
+    "X_MAX_TWEET_CHARS": {
+      "type": "string",
+      "title": "Max characters per post (optional)",
+      "description": "Leave blank for the standard 280-character limit. If your X account has long-form posting (X Premium), set this higher (up to 25000) to publish longer posts. Values below 280 are ignored.",
       "required": false
     }
   }

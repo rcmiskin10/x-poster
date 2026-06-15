@@ -21,7 +21,7 @@
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { buildPlan, postThread, uploadMedia, refreshAccessToken, persistRefreshToken } from "./_poster.mjs";
+import { buildPlan, postThread, uploadMedia, refreshAccessToken, persistRefreshToken, resolveMaxChars } from "./_poster.mjs";
 
 // ---- CLI entry (only when run directly, not when imported by tests) ----
 function parseArgs(argv) {
@@ -71,7 +71,8 @@ async function main() {
     return;
   }
 
-  const plan = buildPlan({ tweets: args.tweets, dryRun: args.dryRun, confirm: args.confirm, hasCreds, image: args.image });
+  const maxChars = resolveMaxChars(process.env.X_MAX_TWEET_CHARS);
+  const plan = buildPlan({ tweets: args.tweets, dryRun: args.dryRun, confirm: args.confirm, hasCreds, image: args.image, maxChars });
 
   console.log(JSON.stringify(plan, null, 2));
   if (plan.errors.length) { console.error("VALIDATION ERRORS:", plan.errors.join("; ")); process.exit(2); }

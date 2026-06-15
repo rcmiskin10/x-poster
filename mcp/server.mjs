@@ -6,7 +6,7 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { buildPlan, costEstimate, containsUrl, postCost } from "./_poster.mjs";
+import { buildPlan, costEstimate, containsUrl, postCost, resolveMaxChars, STANDARD_TWEET_CHARS, LONGFORM_TWEET_CHARS } from "./_poster.mjs";
 import { makeTokenStore } from "./_token-store.mjs";
 import { startAuthSession } from "./_auth.mjs";
 
@@ -110,6 +110,11 @@ export function resolveAuthPort(raw) {
   return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : 8723;
 }
 
+// resolveMaxChars + the char-limit constants live in core (single source of
+// truth, shared with the CLI). Re-exported here so callers and tests that
+// import from the server keep working.
+export { resolveMaxChars, STANDARD_TWEET_CHARS, LONGFORM_TWEET_CHARS };
+
 // ---------------------------------------------------------------------------
 // normalize: text|thread → tweets[], error if both or neither
 // ---------------------------------------------------------------------------
@@ -167,9 +172,10 @@ export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasI
 
 // ---------------------------------------------------------------------------
 // makeTools — pure factory; no SDK, no network required
-// deps = { postThread, statePath, elicit? }
+// deps = { postThread, statePath, elicit?, maxChars? }
 //   postThread(tweets, image?) → ids[]   (injected; may be mock)
 //   elicit is either null or async ({rendered, costUsd}) => boolean
+//   maxChars is the per-tweet character limit (default 280; raised for long-form)
 // ---------------------------------------------------------------------------
 
 export function makeTools(deps) {
@@ -177,6 +183,7 @@ export function makeTools(deps) {
     postThread: injectedPostThread,
     statePath,
     elicit = null,
+    maxChars = STANDARD_TWEET_CHARS,
   } = deps;
 
   // Per-factory random secret for nonces
@@ -188,7 +195,7 @@ export function makeTools(deps) {
   // -------------------------------------------------------------------------
   async function previewHandler({ text, thread, image, in_reply_to }) {
     const tweets = normalize({ text, thread });
-    const plan = buildPlan({ tweets, dryRun: true, image: image || null });
+    const plan = buildPlan({ tweets, dryRun: true, image: image || null, maxChars });
     const confirm_nonce = mintNonce(tweets, image || null, in_reply_to || null);
     return {
       tweets: plan.tweets,
@@ -220,7 +227,7 @@ export function makeTools(deps) {
     }
 
     // Server-side recompute of cost — never trust model-supplied cost
-    const plan = buildPlan({ tweets, dryRun: false, confirm: true, hasCreds: true, image: image || null });
+    const plan = buildPlan({ tweets, dryRun: false, confirm: true, hasCreds: true, image: image || null, maxChars });
     if (plan.errors.length) throw new Error(plan.errors.join("; "));
 
     // Confirmation gate
@@ -374,9 +381,12 @@ export async function startServer() {
   // this one adapter so corePostThread is called exactly once per post.
   const injectedPostThread = makePostAdapter({ tokenStore, corePostThread, clientId, clientSecret });
 
+  // Long-form (Premium) accounts can raise the 280-char limit via X_MAX_TWEET_CHARS.
+  const maxChars = resolveMaxChars(process.env.X_MAX_TWEET_CHARS);
+
   // makeTools(elicit) — factory bound to the stable deps, parameterized on elicit.
   const buildTools = (elicit) =>
-    makeTools({ postThread: injectedPostThread, statePath, elicit });
+    makeTools({ postThread: injectedPostThread, statePath, elicit, maxChars });
 
   // preview_post / auth_instructions never elicit, so a nonce-mode instance is fine.
   // IMPORTANT: nonces are bound to a per-factory random secret, so preview_post and

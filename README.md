@@ -55,6 +55,8 @@ You bring: a Claude Code subscription you already have, and your own pay-per-use
 - **Draft by talking.** `/x-poster:x-post draft a post about what I shipped today` gives you a tweet
   in your voice. Or hand it final text and it posts that verbatim.
 - **Single tweet, thread, or image.** Linear threads and one image (via X's v2 media upload).
+- **Long-form ready.** Defaults to the standard 280-character limit; if your account has long-form
+  posting (X Premium), set `X_MAX_TWEET_CHARS` (up to 25000) to publish longer posts.
 - **Cost preview before you spend.** Every draft is dry-run priced and character-checked first.
 - **A hard never-auto-publish gate.** Nothing leaves your machine until you confirm. With no
   credentials the poster refuses to post at all, so a bare run literally cannot spend.

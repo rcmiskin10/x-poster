@@ -95,6 +95,20 @@ test("imageSizeError: flags oversized images with a friendly, actionable message
   assert.match(imageSizeError(20 * 1024 * 1024, "image/gif"), /15 MB/);
 });
 
+test("buildPlan: char limit is configurable for long-form (Premium) accounts", () => {
+  const long = "x".repeat(400);
+  // Default limit (280) blocks a long-form post.
+  assert.ok(buildPlan({ tweets: [long], dryRun: true }).errors.some((e) => /exceeds 280/.test(e)));
+  // A raised limit lets it through (no char error).
+  const raised = buildPlan({ tweets: [long], dryRun: true, maxChars: 25000 });
+  assert.equal(raised.errors.filter((e) => /exceeds/.test(e)).length, 0);
+  // Still blocks beyond the raised limit, naming the right number.
+  assert.ok(
+    buildPlan({ tweets: ["y".repeat(30000)], dryRun: true, maxChars: 25000 })
+      .errors.some((e) => /exceeds 25000/.test(e)),
+  );
+});
+
 test("buildPlan: image presence + missing-image validation", () => {
   const p = buildPlan({ tweets: ["hi"], dryRun: true, image: "/definitely/not/here.png" });
   assert.equal(p.hasImage, true);

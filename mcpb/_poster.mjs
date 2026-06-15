@@ -44,13 +44,28 @@ export function costEstimate(tweets) {
   return Math.round(tweets.reduce((sum, t) => sum + postCost(t), 0) * 1000) / 1000;
 }
 
+// Per-tweet character limit. Standard X accounts cap at 280; long-form (Premium)
+// accounts go to 25,000. resolveMaxChars reads the user's X_MAX_TWEET_CHARS:
+// default 280, only ever RAISES (floored at 280 so a stray low value can't block
+// a normal post), clamped to X's 25,000 ceiling. Shared by the MCP server + CLI.
+export const STANDARD_TWEET_CHARS = 280;
+export const LONGFORM_TWEET_CHARS = 25000;
+
+export function resolveMaxChars(raw) {
+  const v = (raw ?? "").toString().trim();
+  if (v === "") return STANDARD_TWEET_CHARS;
+  const n = Number(v);
+  if (!Number.isInteger(n)) return STANDARD_TWEET_CHARS;
+  return Math.min(Math.max(n, STANDARD_TWEET_CHARS), LONGFORM_TWEET_CHARS);
+}
+
 // Pure planning core — no network. This is what the dry-run prints and what tests assert against.
-export function buildPlan({ tweets, dryRun, confirm, hasCreds, image }) {
+export function buildPlan({ tweets, dryRun, confirm, hasCreds, image, maxChars = STANDARD_TWEET_CHARS }) {
   const errors = [];
   if (!Array.isArray(tweets) || tweets.length === 0) errors.push("no tweets provided");
   for (const [i, t] of (tweets || []).entries()) {
     if (typeof t !== "string" || t.trim() === "") errors.push(`tweet ${i + 1} is empty`);
-    if ((t || "").length > 280) errors.push(`tweet ${i + 1} exceeds 280 chars (${t.length})`);
+    if ((t || "").length > maxChars) errors.push(`tweet ${i + 1} exceeds ${maxChars} chars (${t.length})`);
   }
   if (image && !existsSync(image)) errors.push(`image not found: ${image}`);
   const willPost = !dryRun && confirm === true && hasCreds === true;

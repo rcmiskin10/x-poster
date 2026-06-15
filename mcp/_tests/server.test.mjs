@@ -1,8 +1,27 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeTools, resolveAuthPort } from "../server.mjs";
+import { makeTools, resolveAuthPort, resolveMaxChars } from "../server.mjs";
 
 const noNet = () => { throw new Error("network called during preview!"); };
+
+test("resolveMaxChars: blank/invalid → 280; only ever raises; clamped to 25000", () => {
+  assert.equal(resolveMaxChars(undefined), 280);
+  assert.equal(resolveMaxChars(""), 280);          // unset optional .mcpb config
+  assert.equal(resolveMaxChars("abc"), 280);
+  assert.equal(resolveMaxChars("100"), 280);        // can't go BELOW 280 (won't break normal posts)
+  assert.equal(resolveMaxChars("4000"), 4000);      // long-form raise
+  assert.equal(resolveMaxChars("999999"), 25000);   // clamped to X's long-form ceiling
+});
+
+test("makeTools honors maxChars: a 400-char post previews clean when the limit is raised", async () => {
+  const tools = makeTools({ postThread: async () => ["1"], statePath: "/tmp/x", elicit: null, maxChars: 25000 });
+  const r = await tools.preview_post.handler({ text: "z".repeat(400) });
+  assert.equal(r.errors.length, 0, "no char error under a raised limit");
+  // And the default still blocks it.
+  const dflt = makeTools({ postThread: async () => ["1"], statePath: "/tmp/x", elicit: null });
+  const blocked = await dflt.preview_post.handler({ text: "z".repeat(400) });
+  assert.ok(blocked.errors.some((e) => /exceeds 280/.test(e)));
+});
 
 test("resolveAuthPort: blank/invalid → 8723 default; explicit values honored", () => {
   assert.equal(resolveAuthPort(undefined), 8723);
