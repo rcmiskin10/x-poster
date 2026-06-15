@@ -4,23 +4,23 @@ import { makeTools, resolveAuthPort, resolveMaxChars } from "../server.mjs";
 
 const noNet = () => { throw new Error("network called during preview!"); };
 
-test("resolveMaxChars: blank/invalid → 280; only ever raises; clamped to 25000", () => {
-  assert.equal(resolveMaxChars(undefined), 280);
-  assert.equal(resolveMaxChars(""), 280);          // unset optional .mcpb config
-  assert.equal(resolveMaxChars("abc"), 280);
-  assert.equal(resolveMaxChars("100"), 280);        // can't go BELOW 280 (won't break normal posts)
-  assert.equal(resolveMaxChars("4000"), 4000);      // long-form raise
-  assert.equal(resolveMaxChars("999999"), 25000);   // clamped to X's long-form ceiling
+test("resolveMaxChars: blank/invalid → long-form default (25000); explicit strict limit honored", () => {
+  assert.equal(resolveMaxChars(undefined), 25000);  // default: don't block on 280
+  assert.equal(resolveMaxChars(""), 25000);          // unset optional .mcpb config
+  assert.equal(resolveMaxChars("abc"), 25000);
+  assert.equal(resolveMaxChars("0"), 25000);         // nonsense → default
+  assert.equal(resolveMaxChars("280"), 280);         // opt BACK into the classic limit
+  assert.equal(resolveMaxChars("4000"), 4000);       // custom limit
+  assert.equal(resolveMaxChars("999999"), 25000);    // clamped to X's hard ceiling
 });
 
-test("makeTools honors maxChars: a 400-char post previews clean when the limit is raised", async () => {
-  const tools = makeTools({ postThread: async () => ["1"], statePath: "/tmp/x", elicit: null, maxChars: 25000 });
-  const r = await tools.preview_post.handler({ text: "z".repeat(400) });
-  assert.equal(r.errors.length, 0, "no char error under a raised limit");
-  // And the default still blocks it.
+test("makeTools char limit: long-form by default, strict only when set", async () => {
+  // Default: a 400-char post previews clean (char count doesn't block).
   const dflt = makeTools({ postThread: async () => ["1"], statePath: "/tmp/x", elicit: null });
-  const blocked = await dflt.preview_post.handler({ text: "z".repeat(400) });
-  assert.ok(blocked.errors.some((e) => /exceeds 280/.test(e)));
+  assert.equal((await dflt.preview_post.handler({ text: "z".repeat(400) })).errors.length, 0);
+  // Opt-in strict limit still blocks.
+  const strict = makeTools({ postThread: async () => ["1"], statePath: "/tmp/x", elicit: null, maxChars: 280 });
+  assert.ok((await strict.preview_post.handler({ text: "z".repeat(400) })).errors.some((e) => /exceeds 280/.test(e)));
 });
 
 test("resolveAuthPort: blank/invalid → 8723 default; explicit values honored", () => {

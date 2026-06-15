@@ -175,7 +175,7 @@ export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasI
 // deps = { postThread, statePath, elicit?, maxChars? }
 //   postThread(tweets, image?) → ids[]   (injected; may be mock)
 //   elicit is either null or async ({rendered, costUsd}) => boolean
-//   maxChars is the per-tweet character limit (default 280; raised for long-form)
+//   maxChars is the per-tweet character limit (default 25000; X's hard ceiling)
 // ---------------------------------------------------------------------------
 
 export function makeTools(deps) {
@@ -183,7 +183,7 @@ export function makeTools(deps) {
     postThread: injectedPostThread,
     statePath,
     elicit = null,
-    maxChars = STANDARD_TWEET_CHARS,
+    maxChars = LONGFORM_TWEET_CHARS,
   } = deps;
 
   // Per-factory random secret for nonces
@@ -381,7 +381,8 @@ export async function startServer() {
   // this one adapter so corePostThread is called exactly once per post.
   const injectedPostThread = makePostAdapter({ tokenStore, corePostThread, clientId, clientSecret });
 
-  // Long-form (Premium) accounts can raise the 280-char limit via X_MAX_TWEET_CHARS.
+  // Char count doesn't block by default (long-form works); X_MAX_TWEET_CHARS can
+  // opt back into a stricter limit like 280.
   const maxChars = resolveMaxChars(process.env.X_MAX_TWEET_CHARS);
 
   // makeTools(elicit) — factory bound to the stable deps, parameterized on elicit.

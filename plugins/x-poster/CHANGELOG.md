@@ -1,13 +1,13 @@
 # Changelog
 
 ## 1.5.0
-- **Long-form posting support.** The validator previously hard-blocked anything over 280 characters,
-  which wrongly rejected posts that long-form (X Premium) accounts are entitled to publish. The
-  per-tweet limit is now configurable via `X_MAX_TWEET_CHARS` (an optional `.mcpb` install field):
-  default 280, raise up to 25000 for long-form accounts. The setting can only ever *raise* the
-  limit — values below 280 are ignored — so a stray config can never block a normal post, and the
-  280 default keeps standard accounts safe from opaque API errors. Honored by both the MCP tools
-  and the `/x-post` CLI path; the limit lives in `core/` as the single source of truth.
+- **Character count no longer blocks posting.** The validator previously hard-blocked anything over
+  280 characters, which wrongly rejected the long-form posts that X Premium accounts can publish.
+  The default per-tweet limit is now X's hard ceiling (25,000) — so long-form just works and X
+  itself enforces each account's real per-post limit at publish time. Set `X_MAX_TWEET_CHARS`
+  (an optional `.mcpb` install field) to opt *back into* a stricter limit like 280 if you want the
+  classic pre-check. Honored by both the MCP tools and the `/x-post` CLI path; the limit lives in
+  `core/` as the single source of truth.
 
 ## 1.4.1
 - **Fix the most common install failure: `X_AUTH_PORT` is now configurable from the `.mcpb` install

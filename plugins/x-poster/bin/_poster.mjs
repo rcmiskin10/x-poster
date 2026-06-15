@@ -44,23 +44,24 @@ export function costEstimate(tweets) {
   return Math.round(tweets.reduce((sum, t) => sum + postCost(t), 0) * 1000) / 1000;
 }
 
-// Per-tweet character limit. Standard X accounts cap at 280; long-form (Premium)
-// accounts go to 25,000. resolveMaxChars reads the user's X_MAX_TWEET_CHARS:
-// default 280, only ever RAISES (floored at 280 so a stray low value can't block
-// a normal post), clamped to X's 25,000 ceiling. Shared by the MCP server + CLI.
+// Per-tweet character limit. By DEFAULT we don't enforce the classic 280 cap —
+// the limit is X's hard ceiling (25,000, the most any account can post), so a
+// long-form (Premium) post just works and X itself enforces each account's real
+// per-post limit at publish time. X_MAX_TWEET_CHARS can opt BACK into a stricter
+// limit (e.g. 280) for anyone who wants the pre-check. Shared by MCP server + CLI.
 export const STANDARD_TWEET_CHARS = 280;
 export const LONGFORM_TWEET_CHARS = 25000;
 
 export function resolveMaxChars(raw) {
   const v = (raw ?? "").toString().trim();
-  if (v === "") return STANDARD_TWEET_CHARS;
+  if (v === "") return LONGFORM_TWEET_CHARS;
   const n = Number(v);
-  if (!Number.isInteger(n)) return STANDARD_TWEET_CHARS;
-  return Math.min(Math.max(n, STANDARD_TWEET_CHARS), LONGFORM_TWEET_CHARS);
+  if (!Number.isInteger(n) || n < 1) return LONGFORM_TWEET_CHARS;
+  return Math.min(n, LONGFORM_TWEET_CHARS);
 }
 
 // Pure planning core — no network. This is what the dry-run prints and what tests assert against.
-export function buildPlan({ tweets, dryRun, confirm, hasCreds, image, maxChars = STANDARD_TWEET_CHARS }) {
+export function buildPlan({ tweets, dryRun, confirm, hasCreds, image, maxChars = LONGFORM_TWEET_CHARS }) {
   const errors = [];
   if (!Array.isArray(tweets) || tweets.length === 0) errors.push("no tweets provided");
   for (const [i, t] of (tweets || []).entries()) {

@@ -58,5 +58,5 @@ MCP-only — the CLI has no `--reply-to`.)
 - Always surface the cost before posting (real money: ~$0.015/post, ~$0.20/post-with-URL).
 - Image upload needs the `media.write` scope; on 403, the user must enable it on their X app
   and re-run `authorize`.
-- The ≤280 draft guidance is the default; long-form (X Premium) accounts can raise the hard limit
-  via `X_MAX_TWEET_CHARS` (up to 25000). Verbatim text over the limit is blocked with a clear error.
+- The ≤280 is *drafting* guidance only; the publish path no longer blocks on character count
+  (long-form works, X enforces the real limit). Set `X_MAX_TWEET_CHARS=280` to re-impose a local cap.

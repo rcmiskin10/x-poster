@@ -40,10 +40,12 @@ test("buildPlan: posts ONLY with confirm + creds + not dry-run", () => {
   assert.equal(buildPlan({ tweets: ["x"], dryRun: false, confirm: true, hasCreds: false }).willPost, false);
 });
 
-test("buildPlan: flags empty and over-length tweets", () => {
+test("buildPlan: flags empty tweets, and over-length only against the active limit", () => {
   const empty = buildPlan({ tweets: [""], dryRun: true });
   assert.ok(empty.errors.some((e) => e.includes("empty")));
-  const long = buildPlan({ tweets: ["x".repeat(281)], dryRun: true });
+  // 281 chars is fine by default now (long-form); only flagged under an explicit strict limit.
+  assert.equal(buildPlan({ tweets: ["x".repeat(281)], dryRun: true }).errors.filter((e) => /exceeds/.test(e)).length, 0);
+  const long = buildPlan({ tweets: ["x".repeat(281)], dryRun: true, maxChars: 280 });
   assert.ok(long.errors.some((e) => e.includes("280")));
 });
 
@@ -95,18 +97,14 @@ test("imageSizeError: flags oversized images with a friendly, actionable message
   assert.match(imageSizeError(20 * 1024 * 1024, "image/gif"), /15 MB/);
 });
 
-test("buildPlan: char limit is configurable for long-form (Premium) accounts", () => {
+test("buildPlan: char count doesn't block by default; strict limit is opt-in", () => {
   const long = "x".repeat(400);
-  // Default limit (280) blocks a long-form post.
-  assert.ok(buildPlan({ tweets: [long], dryRun: true }).errors.some((e) => /exceeds 280/.test(e)));
-  // A raised limit lets it through (no char error).
-  const raised = buildPlan({ tweets: [long], dryRun: true, maxChars: 25000 });
-  assert.equal(raised.errors.filter((e) => /exceeds/.test(e)).length, 0);
-  // Still blocks beyond the raised limit, naming the right number.
-  assert.ok(
-    buildPlan({ tweets: ["y".repeat(30000)], dryRun: true, maxChars: 25000 })
-      .errors.some((e) => /exceeds 25000/.test(e)),
-  );
+  // Default no longer blocks a 400-char long-form post.
+  assert.equal(buildPlan({ tweets: [long], dryRun: true }).errors.filter((e) => /exceeds/.test(e)).length, 0);
+  // An explicit strict limit (e.g. 280) still blocks, naming the limit.
+  assert.ok(buildPlan({ tweets: [long], dryRun: true, maxChars: 280 }).errors.some((e) => /exceeds 280/.test(e)));
+  // X's hard ceiling (25,000) still applies by default — a garbage-sized payload is caught.
+  assert.ok(buildPlan({ tweets: ["y".repeat(30000)], dryRun: true }).errors.some((e) => /exceeds 25000/.test(e)));
 });
 
 test("buildPlan: image presence + missing-image validation", () => {

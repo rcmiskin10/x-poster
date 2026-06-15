@@ -57,7 +57,7 @@
     "X_MAX_TWEET_CHARS": {
       "type": "string",
       "title": "Max characters per post (optional)",
-      "description": "Leave blank for the standard 280-character limit. If your X account has long-form posting (X Premium), set this higher (up to 25000) to publish longer posts. Values below 280 are ignored.",
+      "description": "Leave blank — character count won't block posting (long-form X Premium content works, and X enforces your account's real limit when you post). Set this to 280 only if you want the classic limit enforced locally before posting.",
       "required": false
     }
   }
