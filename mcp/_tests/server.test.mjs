@@ -69,3 +69,31 @@ test("a nonce minted for one payload does not authorize a different payload", as
   const { confirm_nonce } = await tools.preview_post.handler({ text: "A" });
   await assert.rejects(() => tools.publish_post.handler({ text: "B", confirm_nonce }), /confirm|nonce|mismatch/i);
 });
+
+test("video param is included in the nonce binding (preview → publish roundtrip)", async () => {
+  let posted = null;
+  const tools = makeTools({
+    postThread: async (tweets, image, inReplyTo, video) => { posted = { tweets, video }; return ["999"]; },
+    statePath: "/tmp/none",
+    elicit: null,
+  });
+  // Use poster.mjs itself as a stand-in for a real video path (any existing file will do).
+  const fakeVideo = new URL("../../core/poster.mjs", import.meta.url).pathname;
+  const { confirm_nonce } = await tools.preview_post.handler({ text: "vid tweet", video: fakeVideo });
+  // Nonce minted WITH video must verify WITH the same video.
+  const r = await tools.publish_post.handler({ text: "vid tweet", video: fakeVideo, confirm_nonce });
+  assert.deepEqual(posted.tweets, ["vid tweet"]);
+  assert.equal(posted.video, fakeVideo);
+  assert.match(r.urls[0], /x\.com/);
+});
+
+test("a nonce minted with video does not authorize a post without video", async () => {
+  const tools = makeTools({ postThread: async () => ["1"], statePath: "/tmp/none", elicit: null });
+  const fakeVideo = new URL("../../core/poster.mjs", import.meta.url).pathname;
+  const { confirm_nonce } = await tools.preview_post.handler({ text: "A", video: fakeVideo });
+  // Same text but no video → nonce mismatch.
+  await assert.rejects(
+    () => tools.publish_post.handler({ text: "A", confirm_nonce }),
+    /confirm|nonce/i,
+  );
+});

@@ -54,7 +54,10 @@ You bring: a Claude Code subscription you already have, and your own pay-per-use
 
 - **Draft by talking.** `/x-poster:x-post draft a post about what I shipped today` gives you a tweet
   in your voice. Or hand it final text and it posts that verbatim.
-- **Single tweet, thread, or image.** Linear threads and one image (via X's v2 media upload).
+- **Single tweet, thread, image, or video.** Linear threads, one image (via X's v2 media upload),
+  or one `.mp4` video (via X's chunked upload API — INIT → APPEND → FINALIZE → STATUS poll).
+  Image and video are mutually exclusive. Note: X may reject silent video; mux an audio track first
+  (`ffmpeg -i in.mp4 -f lavfi -i anullsrc=r=44100:cl=stereo -c:v copy -c:a aac -shortest out.mp4`).
 - **Long-form ready.** Character count doesn't block posting — long-form (X Premium) content works
   out of the box, and X enforces your account's real limit at publish. Set `X_MAX_TWEET_CHARS=280`
   if you'd rather keep the classic limit enforced locally.
