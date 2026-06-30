@@ -7,12 +7,13 @@
 // COST (X pay-per-use, no free tier): $0.015/post, $0.20/post if it contains a URL
 //   (worst-case: any URL => $0.20). A 5-tweet thread w/ one link ~= $0.26. See docs.x.com for current pricing.
 
-import { readFileSync, writeFileSync, renameSync, existsSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync, renameSync, existsSync } from "node:fs";
 
 export const PRICE_PER_POST = 0.015;
 export const PRICE_PER_POST_WITH_URL = 0.20;
 export const API_BASE = "https://api.x.com";
 export const MEDIA_UPLOAD_URL = `${API_BASE}/2/media/upload`;
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB per segment — X's APPEND limit
 
 // X's media size caps (docs.x.com): 5 MB for static images, 15 MB for GIF.
 export const IMAGE_MAX_BYTES = { "image/gif": 15 * 1024 * 1024, default: 5 * 1024 * 1024 };
@@ -61,21 +62,27 @@ export function resolveMaxChars(raw) {
 }
 
 // Pure planning core — no network. This is what the dry-run prints and what tests assert against.
-export function buildPlan({ tweets, dryRun, confirm, hasCreds, image, maxChars = LONGFORM_TWEET_CHARS }) {
+export function buildPlan({ tweets, dryRun, confirm, hasCreds, image, video, maxChars = LONGFORM_TWEET_CHARS }) {
   const errors = [];
+  if (image && video) errors.push("image and video are mutually exclusive; pass one or the other");
   if (!Array.isArray(tweets) || tweets.length === 0) errors.push("no tweets provided");
   for (const [i, t] of (tweets || []).entries()) {
     if (typeof t !== "string" || t.trim() === "") errors.push(`tweet ${i + 1} is empty`);
     if ((t || "").length > maxChars) errors.push(`tweet ${i + 1} exceeds ${maxChars} chars (${t.length})`);
   }
   if (image && !existsSync(image)) errors.push(`image not found: ${image}`);
+  if (video && !existsSync(video)) errors.push(`video not found: ${video}`);
   const willPost = !dryRun && confirm === true && hasCreds === true;
+  const videoExists = !!(video && existsSync(video));
   return {
     tweets: tweets || [],
     count: (tweets || []).length,
     isThread: (tweets || []).length > 1,
     image: image || null,
     hasImage: !!image,
+    video: video || null,
+    hasVideo: !!video,
+    videoBytes: videoExists ? statSync(video).size : undefined,
     perPost: (tweets || []).map((t) => ({ chars: t.length, hasUrl: containsUrl(t), cost: postCost(t) })),
     estimatedCostUsd: costEstimate(tweets || []),
     dryRun: !!dryRun,
@@ -149,6 +156,85 @@ export async function uploadMedia(accessToken, filePath) {
   return String(mediaId);
 }
 
+// Chunked video upload for tweet video attachment. Three-phase: INIT → APPEND → FINALIZE → STATUS poll.
+// Uses X's dedicated v2 endpoints (NOT the legacy command=INIT/APPEND/FINALIZE single-endpoint form
+// which X sunset 2025-05-30). OAuth2 bearer; same access token as uploadMedia above.
+// media_category="tweet_video" — standard tweet video (organic, NOT the ads "amplify_video" category).
+//
+// NOTE — silent audio: X may reject video with no audio track at STATUS time. This function surfaces
+// X's failed state verbatim (see pollVideoStatus). If X rejects due to audio:
+//   ffmpeg -i in.mp4 -f lavfi -i anullsrc=r=44100:cl=stereo -c:v copy -c:a aac -shortest out.mp4
+export async function uploadVideoChunked(filePath, accessToken) {
+  const bytes = readFileSync(filePath);
+  const totalBytes = bytes.length;
+
+  // INIT — register the upload session; X returns a media_id to reference in subsequent commands
+  const initRes = await fetch(`${MEDIA_UPLOAD_URL}/initialize`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ media_category: "tweet_video", media_type: "video/mp4", total_bytes: totalBytes }),
+  });
+  if (!initRes.ok) throw new Error(`video INIT failed: ${initRes.status} ${await initRes.text()}`);
+  const initJson = await initRes.json();
+  const mediaId = String(initJson.data?.id || initJson.media_id_string || initJson.id || "");
+  if (!mediaId) throw new Error(`video INIT returned no media_id: ${JSON.stringify(initJson)}`);
+
+  // APPEND — ordered ≤5 MB binary segments; await each before sending the next
+  let segmentIndex = 0;
+  for (let offset = 0; offset < totalBytes; offset += CHUNK_SIZE) {
+    const chunk = bytes.slice(offset, Math.min(offset + CHUNK_SIZE, totalBytes));
+    const appendForm = new FormData();
+    appendForm.set("segment_index", String(segmentIndex));
+    appendForm.set("media", new Blob([chunk], { type: "application/octet-stream" }), "chunk");
+    const appendRes = await fetch(`${MEDIA_UPLOAD_URL}/${mediaId}/append`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: appendForm,
+    });
+    if (!appendRes.ok) {
+      throw new Error(`video APPEND segment ${segmentIndex} failed: ${appendRes.status} ${await appendRes.text()}`);
+    }
+    segmentIndex++;
+  }
+
+  // FINALIZE — signal end of upload; X begins async codec transcoding
+  const finalizeRes = await fetch(`${MEDIA_UPLOAD_URL}/${mediaId}/finalize`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!finalizeRes.ok) throw new Error(`video FINALIZE failed: ${finalizeRes.status} ${await finalizeRes.text()}`);
+  const finalizeJson = await finalizeRes.json();
+
+  // STATUS poll — required when X defers codec transcoding (processing_info present in FINALIZE response)
+  const processingInfo = finalizeJson.data?.processing_info ?? finalizeJson.processing_info;
+  if (processingInfo) await pollVideoStatus(mediaId, processingInfo, accessToken);
+
+  return mediaId;
+}
+
+const STATUS_TIMEOUT_MS = 120_000; // 2-minute cap on async processing wait
+
+async function pollVideoStatus(mediaId, initialInfo, accessToken) {
+  let info = initialInfo;
+  const deadline = Date.now() + STATUS_TIMEOUT_MS;
+  while (info.state === "pending" || info.state === "in_progress") {
+    if (Date.now() >= deadline) throw new Error("video processing timed out (>120 s)");
+    await new Promise((r) => setTimeout(r, (info.check_after_secs ?? 5) * 1000));
+    const res = await fetch(
+      `${MEDIA_UPLOAD_URL}?command=STATUS&media_id=${encodeURIComponent(mediaId)}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+    if (!res.ok) throw new Error(`video STATUS failed: ${res.status} ${await res.text()}`);
+    const json = await res.json();
+    info = json.data?.processing_info ?? json.processing_info ?? {};
+  }
+  if (info.state === "failed") {
+    // Surface X's error verbatim — silent-audio rejection appears here as an error object.
+    throw new Error(`video processing failed: ${JSON.stringify(info.error ?? info)}`);
+  }
+  // state === "succeeded" — media_id is ready to attach to a tweet
+}
+
 async function postOne(accessToken, text, inReplyToId, mediaIds) {
   const payload = { text };
   if (inReplyToId) payload.reply = { in_reply_to_tweet_id: inReplyToId };
@@ -174,14 +260,17 @@ async function postOne(accessToken, text, inReplyToId, mediaIds) {
 
 // inReplyToId (optional): an existing tweet id the root tweet replies to. The
 // rest of the thread chains off the root as usual. null/undefined = new post.
-export async function postThread(tweets, creds, onRotatedToken, imagePath, inReplyToId) {
+// videoPath (optional): absolute path to a .mp4; uploaded via chunked INIT/APPEND/FINALIZE.
+// image and video are mutually exclusive (validated in buildPlan; caller must not pass both).
+export async function postThread(tweets, creds, onRotatedToken, imagePath, inReplyToId, videoPath) {
   const accessToken = await refreshAccessToken(creds, onRotatedToken);
   let mediaIds;
   if (imagePath) mediaIds = [await uploadMedia(accessToken, imagePath)];
+  if (videoPath) mediaIds = [await uploadVideoChunked(videoPath, accessToken)];
   const ids = [];
   let replyTo = inReplyToId || null;
   for (let i = 0; i < tweets.length; i++) {
-    // Attach the image to the FIRST tweet only.
+    // Attach image/video to the FIRST tweet only.
     const id = await postOne(accessToken, tweets[i], replyTo, i === 0 ? mediaIds : undefined);
     ids.push(id);
     replyTo = id; // chain the thread

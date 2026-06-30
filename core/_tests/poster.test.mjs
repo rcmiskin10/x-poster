@@ -129,3 +129,32 @@ test("persistRefreshToken: appends when no line exists", () => {
     rmSync(f, { force: true });
   }
 });
+
+test("buildPlan: hasVideo + videoBytes populated when video file exists", () => {
+  // Use an existing real file as a stand-in for a video path.
+  const realPath = new URL("../poster.mjs", import.meta.url).pathname;
+  const p = buildPlan({ tweets: ["video tweet"], dryRun: true, video: realPath });
+  assert.equal(p.hasVideo, true);
+  assert.equal(p.video, realPath);
+  assert.ok(typeof p.videoBytes === "number" && p.videoBytes > 0, "videoBytes should be set for existing file");
+  assert.equal(p.hasImage, false);
+  assert.equal(p.image, null);
+});
+
+test("buildPlan: missing video file produces validation error", () => {
+  const p = buildPlan({ tweets: ["hi"], dryRun: true, video: "/no/such/file.mp4" });
+  assert.equal(p.hasVideo, true);
+  assert.ok(p.errors.some((e) => e.includes("video not found")));
+});
+
+test("buildPlan: image + video mutually exclusive", () => {
+  const p = buildPlan({ tweets: ["hi"], dryRun: true, image: "/some/img.png", video: "/some/vid.mp4" });
+  assert.ok(p.errors.some((e) => /mutually exclusive/.test(e)));
+});
+
+test("buildPlan: video absent → hasVideo false, videoBytes undefined", () => {
+  const p = buildPlan({ tweets: ["no media"], dryRun: true });
+  assert.equal(p.hasVideo, false);
+  assert.equal(p.video, null);
+  assert.equal(p.videoBytes, undefined);
+});

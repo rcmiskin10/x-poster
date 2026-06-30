@@ -50,21 +50,21 @@ export function loadEnvFile(path) {
 // ---------------------------------------------------------------------------
 
 function makeNonceFns(secret) {
-  // Order-preserving canonical form of the normalized payload. in_reply_to is
-  // bound so a reply nonce can't be replayed as a standalone post (or vice versa).
-  function canonical(tweets, image, inReplyTo) {
-    return JSON.stringify({ tweets, image: image || null, in_reply_to: inReplyTo || null });
+  // Order-preserving canonical form of the normalized payload. in_reply_to and
+  // video are bound so a nonce minted for one payload can't be replayed for another.
+  function canonical(tweets, image, inReplyTo, video) {
+    return JSON.stringify({ tweets, image: image || null, in_reply_to: inReplyTo || null, video: video || null });
   }
 
-  function mintNonce(tweets, image, inReplyTo) {
+  function mintNonce(tweets, image, inReplyTo, video) {
     const ts = Date.now();
-    const payload = canonical(tweets, image, inReplyTo);
+    const payload = canonical(tweets, image, inReplyTo, video);
     const sig = createHmac("sha256", secret).update(`${payload}.${ts}`).digest("hex");
     const hash = createHmac("sha256", secret).update(payload).digest("hex");
     return `${hash}.${ts}.${sig}`;
   }
 
-  function verifyNonce(nonce, tweets, image, inReplyTo) {
+  function verifyNonce(nonce, tweets, image, inReplyTo, video) {
     if (!nonce || typeof nonce !== "string") return false;
     const parts = nonce.split(".");
     // Format: payloadHash.ts.sig — sig (64-char hex) last, ts second-to-last, payloadHash everything before.
@@ -76,7 +76,7 @@ function makeNonceFns(secret) {
     if (isNaN(ts)) return false;
     if (Date.now() - ts >= 600_000) return false; // 10-min TTL
 
-    const payload = canonical(tweets, image, inReplyTo);
+    const payload = canonical(tweets, image, inReplyTo, video);
     const expectedHash = createHmac("sha256", secret).update(payload).digest("hex");
     const expectedSig = createHmac("sha256", secret).update(`${payload}.${ts}`).digest("hex");
 
@@ -137,7 +137,7 @@ function normalize({ text, thread }) {
 // stage: "preview" | "published"
 // ---------------------------------------------------------------------------
 
-export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasImage, inReplyTo, errors = [], urls = [] }) {
+export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasImage, hasVideo, inReplyTo, errors = [], urls = [] }) {
   const isThread = tweets.length > 1;
   const kind = isThread ? `thread ×${tweets.length}` : "post";
   const header = `🐦 x-poster ▸ ${kind}${inReplyTo ? ` ▸ reply → ${inReplyTo}` : ""}`;
@@ -153,7 +153,8 @@ export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasI
 
   const chars = perPost.reduce((n, p) => n + p.chars, 0);
   const hasUrl = perPost.some((p) => p.hasUrl);
-  const stats = `📝 ${tweets.length} tweet${isThread ? "s" : ""} · ${chars} chars · ${hasImage ? "🖼 image" : "🖼 none"} · ${hasUrl ? "🔗 url" : "🔗 none"}`;
+  const mediaLabel = hasVideo ? "🎬 video" : hasImage ? "🖼 image" : "🖼 none";
+  const stats = `📝 ${tweets.length} tweet${isThread ? "s" : ""} · ${chars} chars · ${mediaLabel} · ${hasUrl ? "🔗 url" : "🔗 none"}`;
   const cost = stage === "published"
     ? `💸 $${estimatedCostUsd.toFixed(3)} charged`
     : `💸 est. $${estimatedCostUsd.toFixed(3)}`;
@@ -173,7 +174,7 @@ export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasI
 // ---------------------------------------------------------------------------
 // makeTools — pure factory; no SDK, no network required
 // deps = { postThread, statePath, elicit?, maxChars? }
-//   postThread(tweets, image?) → ids[]   (injected; may be mock)
+//   postThread(tweets, image?, inReplyTo?, video?) → ids[]   (injected; may be mock)
 //   elicit is either null or async ({rendered, costUsd}) => boolean
 //   maxChars is the per-tweet character limit (default 25000; X's hard ceiling)
 // ---------------------------------------------------------------------------
@@ -193,16 +194,17 @@ export function makeTools(deps) {
   // -------------------------------------------------------------------------
   // preview_post — PURE, zero network
   // -------------------------------------------------------------------------
-  async function previewHandler({ text, thread, image, in_reply_to }) {
+  async function previewHandler({ text, thread, image, video, in_reply_to }) {
     const tweets = normalize({ text, thread });
-    const plan = buildPlan({ tweets, dryRun: true, image: image || null, maxChars });
-    const confirm_nonce = mintNonce(tweets, image || null, in_reply_to || null);
+    const plan = buildPlan({ tweets, dryRun: true, image: image || null, video: video || null, maxChars });
+    const confirm_nonce = mintNonce(tweets, image || null, in_reply_to || null, video || null);
     return {
       tweets: plan.tweets,
       perPost: plan.perPost,
       estimatedCostUsd: plan.estimatedCostUsd,
       isThread: plan.isThread,
       hasImage: plan.hasImage,
+      hasVideo: plan.hasVideo,
       errors: plan.errors,
       confirm_nonce,
       render: renderDashboard({
@@ -211,6 +213,7 @@ export function makeTools(deps) {
         perPost: plan.perPost,
         estimatedCostUsd: plan.estimatedCostUsd,
         hasImage: plan.hasImage,
+        hasVideo: plan.hasVideo,
         inReplyTo: in_reply_to || null,
         errors: plan.errors,
       }),
@@ -220,14 +223,14 @@ export function makeTools(deps) {
   // -------------------------------------------------------------------------
   // publish_post — the ONLY writer
   // -------------------------------------------------------------------------
-  async function publishHandler({ text, thread, image, confirm_nonce, in_reply_to }) {
+  async function publishHandler({ text, thread, image, video, confirm_nonce, in_reply_to }) {
     const tweets = normalize({ text, thread });
     if (tweets.length === 0 || tweets.every(t => !t || !t.trim())) {
       throw new Error("no tweets: text is empty");
     }
 
     // Server-side recompute of cost — never trust model-supplied cost
-    const plan = buildPlan({ tweets, dryRun: false, confirm: true, hasCreds: true, image: image || null, maxChars });
+    const plan = buildPlan({ tweets, dryRun: false, confirm: true, hasCreds: true, image: image || null, video: video || null, maxChars });
     if (plan.errors.length) throw new Error(plan.errors.join("; "));
 
     // Confirmation gate
@@ -237,13 +240,13 @@ export function makeTools(deps) {
       const approved = await elicit({ rendered, costUsd: plan.estimatedCostUsd });
       if (!approved) throw new Error("user declined");
     } else {
-      if (!verifyNonce(confirm_nonce, tweets, image || null, in_reply_to || null)) {
+      if (!verifyNonce(confirm_nonce, tweets, image || null, in_reply_to || null, video || null)) {
         throw new Error("missing/invalid confirm_nonce — call preview_post first to get a nonce");
       }
     }
 
     // Post via injected postThread
-    const ids = await injectedPostThread(tweets, image || null, in_reply_to || null);
+    const ids = await injectedPostThread(tweets, image || null, in_reply_to || null, video || null);
     const urls = ids.map(id => `https://x.com/i/web/status/${id}`);
     return {
       posted: ids,
@@ -254,6 +257,7 @@ export function makeTools(deps) {
         perPost: plan.perPost,
         estimatedCostUsd: plan.estimatedCostUsd,
         hasImage: plan.hasImage,
+        hasVideo: plan.hasVideo,
         inReplyTo: in_reply_to || null,
         urls,
       }),
@@ -295,9 +299,8 @@ export function makeTools(deps) {
 
 // ---------------------------------------------------------------------------
 // makePostAdapter — pure factory for the injected postThread.
-// core.postThread(tweets, creds, onRotatedToken, image) ALREADY owns refresh +
-// rotation (it calls refreshAccessToken internally and invokes onRotatedToken
-// when the single-use token rotates). So the adapter must:
+// core.postThread(tweets, creds, onRotatedToken, image, inReplyTo, video) ALREADY
+// owns refresh + rotation. So the adapter must:
 //   - call corePostThread EXACTLY ONCE (no extra refresh → no double-burn),
 //   - pass tokenStore.current() as the refresh token,
 //   - persist any rotated token via tokenStore.persist.
@@ -310,7 +313,7 @@ export function makeTools(deps) {
 let _postChain = Promise.resolve();
 
 export function makePostAdapter({ tokenStore, corePostThread, clientId, clientSecret }) {
-  return (tweets, image, inReplyTo) => {
+  return (tweets, image, inReplyTo, video) => {
     // Fail with the FIX, not the symptom: a fresh install has no refresh token
     // yet, and the cure is one authorize call — not an opaque OAuth 400.
     try {
@@ -328,6 +331,7 @@ export function makePostAdapter({ tokenStore, corePostThread, clientId, clientSe
         (newToken) => tokenStore.persist(newToken),
         image || null,
         inReplyTo || null,
+        video || null,
       )
     );
     // Keep the chain alive whether this call succeeds or errors.
@@ -404,7 +408,8 @@ export async function startServer() {
       inputSchema: {
         text: z.string().optional().describe("Single tweet text (mutually exclusive with thread)"),
         thread: z.array(z.string()).optional().describe("Array of tweet texts for a thread (mutually exclusive with text)"),
-        image: z.string().optional().describe("Absolute path to an image file to attach to the first tweet"),
+        image: z.string().optional().describe("Absolute path to an image file to attach to the first tweet (mutually exclusive with video)"),
+        video: z.string().optional().describe("Absolute path to a .mp4 video file to attach to the first tweet via chunked upload (mutually exclusive with image)"),
         in_reply_to: z.string().optional().describe("Existing tweet ID to reply to — the post (or first tweet of a thread) becomes a reply to it"),
       },
     },
@@ -421,7 +426,8 @@ export async function startServer() {
       inputSchema: {
         text: z.string().optional().describe("Single tweet text (mutually exclusive with thread)"),
         thread: z.array(z.string()).optional().describe("Array of tweet texts for a thread (mutually exclusive with text)"),
-        image: z.string().optional().describe("Absolute path to an image file to attach to the first tweet"),
+        image: z.string().optional().describe("Absolute path to an image file to attach to the first tweet (mutually exclusive with video)"),
+        video: z.string().optional().describe("Absolute path to a .mp4 video file to attach to the first tweet via chunked upload (mutually exclusive with image). Must match the video passed to preview_post (the nonce is bound to it)."),
         in_reply_to: z.string().optional().describe("Existing tweet ID to reply to — must match the in_reply_to passed to preview_post (the nonce is bound to it)"),
         confirm_nonce: z.string().optional().describe("Nonce issued by preview_post for the SAME payload. Required when client does not support elicitation."),
       },

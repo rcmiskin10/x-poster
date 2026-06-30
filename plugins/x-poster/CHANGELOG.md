@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.6.0
+- **Native video upload via chunked API.** Attach a `.mp4` to the first tweet of any post or thread
+  using the `--video` CLI flag or the `video` MCP parameter. Upload uses X's dedicated v2 chunked
+  endpoints (`POST /2/media/upload/initialize` → APPEND segments → `/finalize` → STATUS poll),
+  which replaced the legacy `command=INIT/APPEND/FINALIZE` single-endpoint form that X sunset on
+  2025-05-30. Chunk size is 5 MB; a 2-minute timeout guards async codec transcoding.
+- **`image` and `video` are mutually exclusive.** Passing both returns a validation error before any
+  network I/O. `buildPlan` returns `hasVideo` and `videoBytes` for dry-run inspection.
+- **Nonce binding includes `video`.** A `confirm_nonce` minted by `preview_post` with a `video` path
+  cannot be replayed for a different payload (no video, different video, or different text).
+- **`renderDashboard` shows `🎬 video` in the stats line** when a video is attached (previously only
+  image was tracked).
+- Audio note: X may reject video with no audio track at processing time. Mux a silent track first
+  if needed: `ffmpeg -i in.mp4 -f lavfi -i anullsrc=r=44100:cl=stereo -c:v copy -c:a aac -shortest out.mp4`
+
 ## 1.5.0
 - **Character count no longer blocks posting.** The validator previously hard-blocked anything over
   280 characters, which wrongly rejected the long-form posts that X Premium accounts can publish.

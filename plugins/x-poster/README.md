@@ -1,7 +1,7 @@
 # x-poster
 
-Post a tweet or a linear thread (with an optional image) to X **from your terminal**, inside Claude
-Code. Dependency-free Node, OAuth2-PKCE bootstrap, a dry-run cost preview, and a hard
+Post a tweet or a linear thread (with an optional image or video) to X **from your terminal**, inside
+Claude Code. Dependency-free Node, OAuth2-PKCE bootstrap, a dry-run cost preview, and a hard
 **never-auto-publish** gate. Bring your own X app.
 
 - `/x-poster:x-post` — draft (or take) text, score it, preview cost, **confirm**, then post.
@@ -97,7 +97,26 @@ nothing posts until you confirm. Rotated refresh tokens are written back to your
 for a hard ceiling. Drafting costs nothing extra — it runs on the Claude subscription you
 already have.
 
-### Optional
+### Attaching an image (MCP)
+
+Pass `image` (absolute path to a `.png`, `.jpg`, `.gif`, or `.webp`) to `preview_post` /
+`publish_post`. X's size limits apply: 5 MB for static images, 15 MB for GIF. An oversized image
+errors before upload with a clear "resize or compress" message.
+
+### Attaching a video (MCP)
+
+Pass `video` (absolute path to a `.mp4`) to `preview_post` / `publish_post`. Upload uses X's
+dedicated chunked endpoints (INIT → APPEND → FINALIZE → STATUS poll). `image` and `video` are
+mutually exclusive.
+
+**Audio note:** X may reject video with no audio track at processing time. Mux a silent audio
+track before posting if your clip is silent:
+
+```
+ffmpeg -i in.mp4 -f lavfi -i anullsrc=r=44100:cl=stereo -c:v copy -c:a aac -shortest out.mp4
+```
+
+### Optional env vars
 - `VOICE_CONFIG_PATH=/path/to/voice.md` — match your own voice file when drafting.
 - `AVOID_SLOP_PATH=/path/to/avoid-slop.md` — enforce your own forbidden-phrase list (see
   `config/avoid-slop.example.md`).
