@@ -104,11 +104,19 @@ posting bills your app pay-per-use (~$0.015/post — see [What it costs](#what-i
 
 ### Step 2 — Install the connector
 
+The `.mcpb` bundle **is** the Claude Desktop connector (a.k.a. a Desktop Extension) — a single file
+that carries the server code and its dependencies. Installing it adds x-poster to Claude Desktop's
+**Settings → Connectors / Extensions**.
+
 1. Download `x-poster-<version>.mcpb` from the
    [latest release](https://github.com/rcmiskin10/x-poster/releases/latest).
-2. Double-click it (Claude Desktop), or drag it into Claude settings → Extensions / Connectors.
+2. Install it into **Claude Desktop**: double-click the file, or open Claude Desktop →
+   **Settings → Extensions / Connectors → Install from file** and pick the `.mcpb`.
 3. Paste the **Client ID** and **Client Secret** when prompted. **Leave the Refresh Token field
    blank.** They're stored in your OS keychain — you won't be asked again.
+
+> On **Claude Code**? Skip the `.mcpb` and use the plugin instead — see
+> [Use in Claude Code via the plugin](#use-in-claude-code-via-the-plugin).
 
 ### Step 3 — Connect your X account (in the chat)
 
@@ -125,6 +133,79 @@ Claude previews the post and the cost first, and nothing publishes until you say
 
 **Building the bundle yourself instead:** `bash scripts/build-mcpb.sh` outputs `x-poster.mcpb`;
 install it the same way.
+
+---
+
+## Posting: text, threads, images & video
+
+Once you're connected, you post the same four shapes from any surface — in chat (the Claude Desktop
+connector / MCP tools), the Claude Code plugin, or the terminal CLI. **Every path previews the
+content and cost first and never publishes until you confirm.**
+
+### In chat (Claude Desktop connector or Claude Code)
+
+Describe the post; Claude calls `preview_post` (shows the plan + cost), and only after you say yes,
+`publish_post`. Both tools accept:
+
+| Field | Meaning |
+|---|---|
+| `text` | a single tweet |
+| `thread` | an array of tweets posted as a linear thread (use instead of `text`) |
+| `image` | absolute path to one image; attaches to the first tweet |
+| `video` | absolute path to one `.mp4`; attaches to the first tweet. **Mutually exclusive with `image`.** |
+| `in_reply_to` | id of a tweet to reply to (optional) |
+
+Things you can just say to Claude:
+
+> post a tweet: shipped video upload today 🎬
+>
+> post a thread: (1) the bug that ate my morning … (2) the one-line fix
+>
+> post "new demo" with the video at /Users/me/clips/demo.mp4
+>
+> post "before / after" with the image /Users/me/Desktop/shot.png
+
+### Terminal CLI (`x-post.mjs`)
+
+Pass your env file explicitly with `--env-file`; nothing is read implicitly. `--dry-run` (the default
+when no credentials are present) validates and prices without posting — a real post needs **both**
+`--confirm` and credentials.
+
+```bash
+# single tweet
+node --env-file=./x-poster.env x-post.mjs --confirm --text "shipped video upload today 🎬"
+
+# thread (each quoted arg is one tweet)
+node --env-file=./x-poster.env x-post.mjs --confirm --thread "tweet 1" "tweet 2 with a link"
+
+# image (one file, attaches to the first tweet)
+node --env-file=./x-poster.env x-post.mjs --confirm --image ./shot.png --text "before / after"
+
+# video (.mp4; mutually exclusive with --image)
+node --env-file=./x-poster.env x-post.mjs --confirm --video ./demo.mp4 --text "new demo"
+
+# preview only — validate + price, post nothing
+node --env-file=./x-poster.env x-post.mjs --dry-run --thread "draft 1" "draft 2"
+```
+
+Flags: `--text` · `--thread <t1> <t2> …` · `--image <path>` · `--video <path>` · `--confirm` ·
+`--dry-run` · `--upload-only <image>` (upload media, print its id, post nothing).
+
+### The one video gotcha — silent clips
+
+X's transcoder can **reject a video with no audio track**. Screen recordings are often silent, so if
+a video post fails during processing, mux in a silent stereo track and post the muxed file:
+
+```bash
+ffmpeg -i in.mp4 -f lavfi -i anullsrc=r=44100:cl=stereo -c:v copy -c:a aac -shortest out.mp4
+```
+
+### Media notes
+
+- **One** media item per post — one image **or** one video — attached to the **first** tweet.
+- Video is `.mp4` (H.264 video / AAC audio), up to X's per-account limit (longer on Premium). Large
+  files upload in chunks automatically (`initialize → append → finalize → status`).
+- Uploading media needs the `media.write` scope on your token (enabled in Step 1).
 
 ---
 

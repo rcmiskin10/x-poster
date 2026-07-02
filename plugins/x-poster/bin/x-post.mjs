@@ -18,6 +18,7 @@
 //   node --env-file=./your.env x-post.mjs --dry-run --text "single tweet"
 //   node --env-file=./your.env x-post.mjs --dry-run --thread "tweet 1" "tweet 2 with https://x.com/foo"
 //   node --env-file=./your.env x-post.mjs --confirm --image ./shot.png --text "..."   # REAL post; costs money
+//   node --env-file=./your.env x-post.mjs --confirm --video ./clip.mp4 --text "..."   # video (mp4); image/video are mutually exclusive
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -25,12 +26,13 @@ import { buildPlan, postThread, uploadMedia, refreshAccessToken, persistRefreshT
 
 // ---- CLI entry (only when run directly, not when imported by tests) ----
 function parseArgs(argv) {
-  const out = { dryRun: false, confirm: false, tweets: [], image: undefined, uploadOnly: false };
+  const out = { dryRun: false, confirm: false, tweets: [], image: undefined, video: undefined, uploadOnly: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") out.dryRun = true;
     else if (a === "--confirm") out.confirm = true;
     else if (a === "--image") out.image = argv[++i];
+    else if (a === "--video") out.video = argv[++i];
     else if (a === "--upload-only") { out.uploadOnly = true; out.image = argv[++i]; } // upload media, print id, no post
     else if (a === "--text") out.tweets.push(argv[++i]);
     else if (a === "--thread") { while (argv[i + 1] && !argv[i + 1].startsWith("--")) out.tweets.push(argv[++i]); }
@@ -72,7 +74,7 @@ async function main() {
   }
 
   const maxChars = resolveMaxChars(process.env.X_MAX_TWEET_CHARS);
-  const plan = buildPlan({ tweets: args.tweets, dryRun: args.dryRun, confirm: args.confirm, hasCreds, image: args.image, maxChars });
+  const plan = buildPlan({ tweets: args.tweets, dryRun: args.dryRun, confirm: args.confirm, hasCreds, image: args.image, video: args.video, maxChars });
 
   console.log(JSON.stringify(plan, null, 2));
   if (plan.errors.length) { console.error("VALIDATION ERRORS:", plan.errors.join("; ")); process.exit(2); }
@@ -82,8 +84,9 @@ async function main() {
     return;
   }
 
-  console.error(`Posting ${plan.count} tweet(s)${plan.hasImage ? " with image" : ""}… estimated cost $${plan.estimatedCostUsd}.`);
-  const ids = await postThread(args.tweets, creds, onRotatedToken, args.image);
+  const mediaNote = plan.hasVideo ? " with video" : plan.hasImage ? " with image" : "";
+  console.error(`Posting ${plan.count} tweet(s)${mediaNote}… estimated cost $${plan.estimatedCostUsd}.`);
+  const ids = await postThread(args.tweets, creds, onRotatedToken, args.image, null, args.video);
   console.log(JSON.stringify({ posted: ids, urls: ids.map((id) => `https://x.com/i/web/status/${id}`) }, null, 2));
 }
 
