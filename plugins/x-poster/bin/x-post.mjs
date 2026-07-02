@@ -25,7 +25,7 @@ import { resolve } from "node:path";
 import { buildPlan, postThread, uploadMedia, refreshAccessToken, persistRefreshToken, resolveMaxChars } from "./_poster.mjs";
 
 // ---- CLI entry (only when run directly, not when imported by tests) ----
-function parseArgs(argv) {
+export function parseArgs(argv) { // exported for core/_tests/surface-parity.test.mjs
   const out = { dryRun: false, confirm: false, tweets: [], image: undefined, video: undefined, uploadOnly: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];

@@ -205,6 +205,7 @@ export function makeTools(deps) {
       isThread: plan.isThread,
       hasImage: plan.hasImage,
       hasVideo: plan.hasVideo,
+      videoBytes: plan.videoBytes,
       errors: plan.errors,
       confirm_nonce,
       render: renderDashboard({
