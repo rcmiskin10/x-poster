@@ -1,0 +1,29 @@
+# Runs the dependency-free suites (no npm install needed): core, vendor-sync,
+# surface-parity, plugin CLI. The mcp/_tests suite needs the SDK installed and
+# runs in a second job with npm ci.
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test core/_tests/*.test.mjs plugins/x-poster/bin/_tests/*.test.mjs
+
+  mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: mcp
+      - run: node --test mcp/_tests/*.test.mjs
