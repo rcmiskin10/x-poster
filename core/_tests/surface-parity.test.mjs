@@ -167,3 +167,46 @@ test("MCP: handlers thread video end-to-end (preview reports it, publish passes 
     rmSync(otherClip, { force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Scheduling surface (milestone 4 — vibedraft API client). Its own section
+// because scheduling is a different tool family (schedule_post / list_scheduled /
+// cancel_scheduled), not fields on preview/publish.
+// ---------------------------------------------------------------------------
+
+test("core: scheduler exports exist (client, validation, config resolution)", async () => {
+  const scheduler = await import("../scheduler.mjs");
+  assert.equal(typeof scheduler.makeScheduleClient, "function", "makeScheduleClient missing from core");
+  assert.equal(typeof scheduler.validateSchedule, "function", "validateSchedule missing from core");
+  assert.equal(typeof scheduler.resolveVibedraftConfig, "function", "resolveVibedraftConfig missing from core");
+});
+
+test("CLI: parseArgs wires every scheduling flag", () => {
+  assert.equal(parseArgs(["--at", "2026-07-08T09:00:00Z"]).at, "2026-07-08T09:00:00Z",
+    "CLI drift: --at does not populate .at — scheduling would silently post-now");
+  assert.equal(parseArgs(["--list-scheduled"]).listScheduled, true,
+    "CLI drift: --list-scheduled does not populate .listScheduled");
+  assert.equal(parseArgs(["--cancel", "row-1"]).cancel, "row-1",
+    "CLI drift: --cancel does not populate .cancel");
+  assert.equal(parseArgs(["--status", "posted"]).status, "posted",
+    "CLI drift: --status does not populate .status");
+});
+
+test("MCP: scheduling tools registered with schemas; schedule_post keeps the nonce gate", () => {
+  for (const toolName of ["schedule_post", "list_scheduled", "cancel_scheduled"]) {
+    const block = registerToolBlock(toolName);
+    assert.ok(block, `MCP drift: no registerTool block for ${toolName}`);
+  }
+  const scheduleBlock = registerToolBlock("schedule_post");
+  assert.match(scheduleBlock, /\bscheduled_for: z\./,
+    "MCP drift: schedule_post schema lost scheduled_for");
+  assert.match(scheduleBlock, /\bconfirm_nonce: z\./,
+    "MCP drift: schedule_post schema lost the confirm_nonce gate field");
+});
+
+test("MCP: makeTools exposes the schedule handler family", () => {
+  const tools = makeTools({ postThread: async () => ["1"], statePath: "/tmp/parity-x" });
+  for (const name of ["schedule_post", "list_scheduled", "cancel_scheduled"]) {
+    assert.equal(typeof tools[name]?.handler, "function", `makeTools missing ${name}`);
+  }
+});

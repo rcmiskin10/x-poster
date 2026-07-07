@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "x-poster",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Post a tweet or thread (with optional image) to X. Preview cost first; never auto-publishes.",
   "author": { "name": "rcmisk" },
   "license": "MIT",
