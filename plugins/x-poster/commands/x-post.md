@@ -1,7 +1,7 @@
 ---
-description: "Draft (or take) a tweet/thread, optionally attach an image, score it against a built-in bookmarkability rubric, preview the cost, and post to X — ONLY after you explicitly confirm. Never auto-publishes. X pay-per-use (~$0.015/post, ~$0.20/post-with-URL)."
-argument-hint: "<text to post | 'draft a post about X'> [--image <path>] [--reply-to <tweet-id>]"
-allowed-tools: ["Read", "Bash", "mcp__x-poster__preview_post", "mcp__x-poster__publish_post", "mcp__x-poster__authorize", "mcp__x-poster__auth_instructions"]
+description: "Draft (or take) a tweet/thread, optionally attach an image, score it against a built-in bookmarkability rubric, preview the cost, and post to X — ONLY after you explicitly confirm. Never auto-publishes. Can also SCHEDULE for later via vibedraft (text only). X pay-per-use (~$0.015/post, ~$0.20/post-with-URL)."
+argument-hint: "<text to post | 'draft a post about X'> [--image <path>] [--reply-to <tweet-id>] [--at <ISO time | 'tomorrow 9am'>]"
+allowed-tools: ["Read", "Bash", "mcp__x-poster__preview_post", "mcp__x-poster__publish_post", "mcp__x-poster__schedule_post", "mcp__x-poster__list_scheduled", "mcp__x-poster__cancel_scheduled", "mcp__x-poster__authorize", "mcp__x-poster__auth_instructions"]
 ---
 
 # /x-poster:x-post
@@ -10,22 +10,27 @@ Turn `$ARGUMENTS` into an X post via the x-poster MCP tools. Announce each step 
 one-line emoji status so the user always knows where the workflow is.
 
 > ⛔ **HARD GATE — never auto-publish.** Present the preview and get an explicit, affirmative
-> confirmation ("ship it") in this conversation before calling `publish_post`. No bypass.
-> The server's nonce/elicitation check is the backstop, not the gate.
+> confirmation ("ship it" / "ship it at 9am") in this conversation before calling `publish_post`
+> or `schedule_post`. No bypass. The server's nonce/elicitation check is the backstop, not the gate.
 
 ## Step 0 — route (decide deterministically, announce it)
 
 - `$ARGUMENTS` contains final text (quoted, or "post this …") → `📋 route: fast — verbatim text, skipping draft + rubric`
 - `$ARGUMENTS` is an instruction ("draft a post about …") → `📋 route: draft`
+- A future time is named (`--at`, "at 9am", "tomorrow", "schedule for …") → add `📅 mode: schedule`
+  to the route line. Scheduling is TEXT-ONLY (no image/video — vibedraft's API v1 has no media);
+  if media was also requested, say so and ask: post now with media, or schedule without it.
 
 LLM work happens ONLY on the draft route (and the image screen). Everything else is plumbing —
 do not editorialize, score, or reformat on the fast route.
 
 ## Steps
 
-1. `📝 resolve` — extract the text/thread, reply target (`--reply-to` or "reply to <id>"), and
-   image path. If an image is given: Read it and confirm it contains nothing the user wouldn't
-   want public. One image max; it attaches to the first tweet.
+1. `📝 resolve` — extract the text/thread, reply target (`--reply-to` or "reply to <id>"), image
+   path, and any scheduled time (resolve relative phrases like "tomorrow 9am" to an ISO 8601
+   timestamp in the user's local timezone; must be >2 min and <30 days out). If an image is
+   given: Read it and confirm it contains nothing the user wouldn't want public. One image max;
+   it attaches to the first tweet.
 
 2. `✍️ draft` — **draft route only.** Single tweet or linear thread, each ≤280 chars. Score
    against `${CLAUDE_PLUGIN_ROOT}/config/rubric.md` (aim ≥4/5); honor `AVOID_SLOP_PATH` and
@@ -34,14 +39,27 @@ do not editorialize, score, or reformat on the fast route.
 
 3. `🔍 preview` — call `preview_post` (with `in_reply_to` for replies). **Relay its `render`
    block to the user VERBATIM — do not reformat it.** If `errors` is non-empty, stop and fix.
+   In schedule mode, state the resolved fire time alongside the preview.
 
-4. `🚦 gate` — STOP. Wait for an explicit affirmative ("ship it"). Anything else is feedback:
-   apply it and re-preview (the nonce is payload-bound — any change needs a fresh preview).
+4. `🚦 gate` — STOP. Wait for an explicit affirmative ("ship it" / "ship it at 9am"). Anything
+   else is feedback: apply it and re-preview (the nonce is payload-bound — any change needs a
+   fresh preview). The user naming a NEW time is not a content change — no re-preview needed.
 
-5. `🚀 publish` — call `publish_post` with the SAME payload + the `confirm_nonce` from step 3.
-   Relay its `render` block verbatim.
+5. `🚀 publish` **or** `📅 schedule` — with the SAME payload + the `confirm_nonce` from step 3:
+   - post now → `publish_post`
+   - schedule mode → `schedule_post` with `scheduled_for` (the confirmed time). vibedraft's cron
+     posts it at that time even if this machine is asleep; the stored time may shift ±a few
+     minutes (deliberate humanization).
+   Relay the `render` block verbatim either way.
+
+Managing the queue (no gate — read-only / safe direction):
+- "what's scheduled?" → `list_scheduled` (posted rows include `posted_tweet_id`).
+- "cancel <id> / cancel that" → `cancel_scheduled` (pending rows only; canceling any thread
+  member cancels the whole thread).
 
 If a tool fails with "not connected", run `authorize`, present the link, then resume at step 3.
+If `schedule_post` fails with "VIBEDRAFT_API_URL and VIBEDRAFT_API_TOKEN", the user must create a
+token in vibedraft (Settings → API tokens) and add both vars to the env file `X_ENV_FILE` points at.
 
 ## Fallback — MCP server unavailable
 
@@ -49,13 +67,16 @@ Use the bundled CLI: `node --env-file="$ENV_FILE" "${CLAUDE_PLUGIN_ROOT}/bin/x-p
 to preview, then `--confirm` to post (after the same gate), where
 `ENV_FILE="${CLAUDE_PLUGIN_OPTION_ENV_FILE:-$X_ENV_FILE}"` and `X_ENV_FILE="$ENV_FILE"` is also
 exported on the posting call so rotated tokens persist. Flags: `--text "<tweet>"` or
-`--thread "<t1>" "<t2>" …`, `--image <abs-path>`. Same gate, same rules. (Replies are
+`--thread "<t1>" "<t2>" …`, `--image <abs-path>`. Scheduling: `--at <ISO>` (with `--confirm`),
+`--list-scheduled [--status <s>]`, `--cancel <id>`. Same gate, same rules. (Replies are
 MCP-only — the CLI has no `--reply-to`.)
 
 ## Guardrails
 
-- Never post without step 4's explicit confirmation.
-- Always surface the cost before posting (real money: ~$0.015/post, ~$0.20/post-with-URL).
+- Never post OR schedule without step 4's explicit confirmation.
+- Always surface the cost before posting (real money: ~$0.015/post, ~$0.20/post-with-URL —
+  scheduled posts bill the same at fire time, via the user's vibedraft-connected X app).
+- Scheduling is text-only in v1 — never silently drop media to make a schedule work; ask.
 - Image upload needs the `media.write` scope; on 403, the user must enable it on their X app
   and re-run `authorize`.
 - The ≤280 is *drafting* guidance only; the publish path no longer blocks on character count

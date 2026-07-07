@@ -191,6 +191,32 @@ node --env-file=./x-poster.env x-post.mjs --dry-run --thread "draft 1" "draft 2"
 Flags: `--text` · `--thread <t1> <t2> …` · `--image <path>` · `--video <path>` · `--confirm` ·
 `--dry-run` · `--upload-only <image>` (upload media, print its id, post nothing).
 
+### Scheduling for later (via vibedraft)
+
+If you use [vibedraft](https://vibedraft.app), x-poster can hand a post to its scheduler instead of
+posting immediately — the vibedraft cron fires it at the chosen time **even if your machine is
+asleep**, through *your* vibedraft-connected X account (cost billed there, not to this app's keys).
+Text and threads only — no media in v1. Setup: create a token in vibedraft under **Settings → API
+tokens** and add `VIBEDRAFT_API_URL` + `VIBEDRAFT_API_TOKEN` to the same env file.
+
+In chat, the flow mirrors posting: `preview_post` first, then — after you say "ship it at 9am" —
+`schedule_post` (same content-frozen confirmation gate). `list_scheduled` shows your queue (posted
+rows include `posted_tweet_id`); `cancel_scheduled` cancels a pending row.
+
+```bash
+# schedule instead of posting now (same --confirm gate; --dry-run schedules nothing)
+node --env-file=./x-poster.env x-post.mjs --confirm --at 2026-07-08T09:00:00Z --text "..."
+
+# list scheduled rows (add --status pending/posted/… or --since <ISO>)
+node --env-file=./x-poster.env x-post.mjs --list-scheduled --status pending
+
+# cancel a pending row before it fires
+node --env-file=./x-poster.env x-post.mjs --cancel <id>
+```
+
+Note: vibedraft nudges `scheduled_for` by ±a few minutes (per your vibedraft humanization setting),
+so the stored time may differ slightly from what you asked for. That's a feature.
+
 ### The one video gotcha — silent clips
 
 X's transcoder can **reject a video with no audio track**. Screen recordings are often silent, so if

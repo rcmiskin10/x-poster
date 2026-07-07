@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { buildPlan, costEstimate, containsUrl, postCost, resolveMaxChars, STANDARD_TWEET_CHARS, LONGFORM_TWEET_CHARS } from "./_poster.mjs";
 import { makeTokenStore } from "./_token-store.mjs";
 import { startAuthSession } from "./_auth.mjs";
+import { resolveVibedraftConfig, validateSchedule, makeScheduleClient } from "./_scheduler.mjs";
 
 // ---------------------------------------------------------------------------
 // loadEnvFile — minimal KEY=VALUE parser (mirrors the CLI's X_ENV_FILE support
@@ -134,10 +135,10 @@ function normalize({ text, thread }) {
 // renderDashboard — preformatted step-tracker block for tool responses.
 // Clients relay it VERBATIM, so the workflow display is deterministic and
 // identical across sessions — the model never reformats preview data.
-// stage: "preview" | "published"
+// stage: "preview" | "published" | "scheduled"
 // ---------------------------------------------------------------------------
 
-export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasImage, hasVideo, inReplyTo, errors = [], urls = [] }) {
+export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasImage, hasVideo, inReplyTo, errors = [], urls = [], scheduledFor = null, scheduledIds = [] }) {
   const isThread = tweets.length > 1;
   const kind = isThread ? `thread ×${tweets.length}` : "post";
   const header = `🐦 x-poster ▸ ${kind}${inReplyTo ? ` ▸ reply → ${inReplyTo}` : ""}`;
@@ -148,6 +149,7 @@ export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasI
   const ok = errors.length === 0;
   const steps =
     stage === "published" ? "✅ resolve   ✅ validate   ✅ gate   ✅ publish"
+    : stage === "scheduled" ? "✅ resolve   ✅ validate   ✅ gate   📅 scheduled"
     : ok                  ? "✅ resolve   ✅ validate   🟡 gate   ⚪ publish"
     :                       "✅ resolve   ❌ validate   ⚪ gate   ⚪ publish";
 
@@ -157,11 +159,16 @@ export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasI
   const stats = `📝 ${tweets.length} tweet${isThread ? "s" : ""} · ${chars} chars · ${mediaLabel} · ${hasUrl ? "🔗 url" : "🔗 none"}`;
   const cost = stage === "published"
     ? `💸 $${estimatedCostUsd.toFixed(3)} charged`
+    : stage === "scheduled"
+    ? `💸 est. $${estimatedCostUsd.toFixed(3)} at post time (billed via vibedraft's X app)`
     : `💸 est. $${estimatedCostUsd.toFixed(3)}`;
 
   const lines = [header, rule, body, rule, steps, stats, cost];
   if (stage === "published") {
     for (const u of urls) lines.push(`🚀 live: ${u}`);
+  } else if (stage === "scheduled") {
+    lines.push(`📅 fires at ${scheduledFor} (vibedraft may nudge by ±a few min to look human)`);
+    for (const id of scheduledIds) lines.push(`🗂 scheduled id: ${id}`);
   } else if (ok) {
     lines.push(`🚦 awaiting explicit confirmation — reply "ship it" to publish`);
   } else {
@@ -173,10 +180,13 @@ export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasI
 
 // ---------------------------------------------------------------------------
 // makeTools — pure factory; no SDK, no network required
-// deps = { postThread, statePath, elicit?, maxChars? }
+// deps = { postThread, statePath, elicit?, maxChars?, getScheduleClient? }
 //   postThread(tweets, image?, inReplyTo?, video?) → ids[]   (injected; may be mock)
 //   elicit is either null or async ({rendered, costUsd}) => boolean
 //   maxChars is the per-tweet character limit (default 25000; X's hard ceiling)
+//   getScheduleClient() → vibedraft schedule client (throws an actionable error
+//     when VIBEDRAFT_API_URL/TOKEN are unset — resolution is LAZY so the server
+//     works fine for users who never schedule)
 // ---------------------------------------------------------------------------
 
 export function makeTools(deps) {
@@ -185,6 +195,9 @@ export function makeTools(deps) {
     statePath,
     elicit = null,
     maxChars = LONGFORM_TWEET_CHARS,
+    getScheduleClient = () => {
+      throw new Error("scheduling is not configured for this server instance");
+    },
   } = deps;
 
   // Per-factory random secret for nonces
@@ -266,6 +279,80 @@ export function makeTools(deps) {
   }
 
   // -------------------------------------------------------------------------
+  // schedule_post — writes to vibedraft, not X. Same human gate as publish:
+  // the preview_post nonce (bound to the exact tweets + in_reply_to, media
+  // null) must verify, or an elicitation-capable client confirms in-form.
+  // The user's "ship at T" IS the publish approval — content is frozen at
+  // the nonce; only the time is chosen at confirm.
+  // -------------------------------------------------------------------------
+  async function scheduleHandler({ text, thread, scheduled_for, in_reply_to, confirm_nonce }) {
+    const tweets = normalize({ text, thread });
+
+    const errors = validateSchedule({ tweets, scheduledFor: scheduled_for, inReplyTo: in_reply_to || null });
+    // Char-limit + cost come from the same planner as publish.
+    const plan = buildPlan({ tweets, dryRun: true, maxChars });
+    errors.push(...plan.errors);
+    if (errors.length) throw new Error(errors.join("; "));
+
+    // Confirmation gate — identical branches to publish_post. The nonce is the
+    // one preview_post minted for this exact payload (image/video null: media
+    // is unsupported for scheduling, so a media-bound nonce won't verify).
+    if (typeof elicit === "function") {
+      const reply = in_reply_to ? `\n\n(reply to tweet ${in_reply_to})` : "";
+      const rendered = tweets.join("\n---\n") + reply + `\n\nSchedule for: ${scheduled_for}`;
+      const approved = await elicit({ rendered, costUsd: plan.estimatedCostUsd });
+      if (!approved) throw new Error("user declined");
+    } else {
+      if (!verifyNonce(confirm_nonce, tweets, null, in_reply_to || null, null)) {
+        throw new Error("missing/invalid confirm_nonce — call preview_post first to get a nonce");
+      }
+    }
+
+    const client = getScheduleClient();
+    const rows = await client.schedulePosts({
+      tweets,
+      scheduledFor: scheduled_for,
+      inReplyTo: in_reply_to || null,
+    });
+    // vibedraft applies the user's humanization jitter server-side.
+    const actualFor = rows[0]?.scheduled_for ?? scheduled_for;
+    return {
+      scheduled: rows,
+      scheduled_for: actualFor,
+      render: renderDashboard({
+        stage: "scheduled",
+        tweets,
+        perPost: plan.perPost,
+        estimatedCostUsd: plan.estimatedCostUsd,
+        hasImage: false,
+        hasVideo: false,
+        inReplyTo: in_reply_to || null,
+        scheduledFor: actualFor,
+        scheduledIds: rows.map((r) => r.id),
+      }),
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // list_scheduled — read-only; how callers learn posted_tweet_id
+  // -------------------------------------------------------------------------
+  async function listScheduledHandler({ status, since, limit } = {}) {
+    const client = getScheduleClient();
+    const posts = await client.listScheduled({ status, since, limit });
+    return { posts };
+  }
+
+  // -------------------------------------------------------------------------
+  // cancel_scheduled — the "safe direction" (prevents a post); no gate needed
+  // -------------------------------------------------------------------------
+  async function cancelScheduledHandler({ id }) {
+    if (!id || typeof id !== "string") throw new Error("id is required");
+    const client = getScheduleClient();
+    const canceled = await client.cancelScheduled(id);
+    return { canceled };
+  }
+
+  // -------------------------------------------------------------------------
   // auth_instructions — read-only
   // -------------------------------------------------------------------------
   async function authHandler() {
@@ -294,6 +381,9 @@ export function makeTools(deps) {
   return {
     preview_post: { handler: previewHandler },
     publish_post: { handler: publishHandler },
+    schedule_post: { handler: scheduleHandler },
+    list_scheduled: { handler: listScheduledHandler },
+    cancel_scheduled: { handler: cancelScheduledHandler },
     auth_instructions: { handler: authHandler },
   };
 }
@@ -390,9 +480,21 @@ export async function startServer() {
   // opt back into a stricter limit like 280.
   const maxChars = resolveMaxChars(process.env.X_MAX_TWEET_CHARS);
 
+  // vibedraft schedule client — resolved LAZILY on first schedule/list/cancel
+  // call so the server boots fine without VIBEDRAFT_* config (scheduling is
+  // optional). Same env-file fallback as the X creds.
+  let scheduleClient = null;
+  const getScheduleClient = () => {
+    if (!scheduleClient) {
+      const cfg = resolveVibedraftConfig(process.env, fileCreds);
+      scheduleClient = makeScheduleClient(cfg);
+    }
+    return scheduleClient;
+  };
+
   // makeTools(elicit) — factory bound to the stable deps, parameterized on elicit.
   const buildTools = (elicit) =>
-    makeTools({ postThread: injectedPostThread, statePath, elicit, maxChars });
+    makeTools({ postThread: injectedPostThread, statePath, elicit, maxChars, getScheduleClient });
 
   // preview_post / auth_instructions never elicit, so a nonce-mode instance is fine.
   // IMPORTANT: nonces are bound to a per-factory random secret, so preview_post and
@@ -466,6 +568,87 @@ export async function startServer() {
       }
 
       const result = await tools.publish_post.handler(args);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "schedule_post",
+    {
+      description:
+        "Schedule an X post or thread for a future time via the user's vibedraft account (text only — no media). " +
+        "The cron dispatcher posts it at the scheduled time even if this machine is asleep. " +
+        "Requires a valid confirm_nonce from preview_post for the SAME text/thread — the user's 'ship it at <time>' is the approval; content is frozen at the nonce. " +
+        "Returns a `render` dashboard block — show it to the user VERBATIM.",
+      inputSchema: {
+        text: z.string().optional().describe("Single tweet text (mutually exclusive with thread)"),
+        thread: z.array(z.string()).optional().describe("Array of 2-6 tweet texts for a thread (mutually exclusive with text)"),
+        scheduled_for: z.string().describe("ISO 8601 timestamp (with offset or Z) — must be >2 minutes and <30 days from now. vibedraft applies a small human-looking jitter."),
+        in_reply_to: z.string().optional().describe("Existing tweet ID to reply to — single post only, must match the in_reply_to passed to preview_post"),
+        confirm_nonce: z.string().optional().describe("Nonce issued by preview_post for the SAME payload (no image/video — media is unsupported for scheduling). Required when client does not support elicitation."),
+      },
+    },
+    async (args, ctx) => {
+      const supportsElicitation = !!ctx?.clientCapabilities?.elicitation;
+      let tools;
+      if (supportsElicitation) {
+        const elicit = async ({ rendered, costUsd }) => {
+          const result = await ctx.mcpReq.elicitInput({
+            mode: "form",
+            message: `Confirm SCHEDULING via vibedraft:\n\n${rendered}\n\nEstimated cost at post time: $${costUsd.toFixed(3)}`,
+            requestedSchema: {
+              type: "object",
+              properties: {
+                confirm: {
+                  type: "boolean",
+                  title: "Confirm schedule",
+                  description: "Set to true to approve scheduling",
+                },
+              },
+              required: ["confirm"],
+            },
+          });
+          return result.action === "accept" && result.content?.confirm === true;
+        };
+        tools = buildTools(elicit);
+      } else {
+        tools = nonceTools;
+      }
+      const result = await tools.schedule_post.handler(args);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "list_scheduled",
+    {
+      description:
+        "List the user's vibedraft scheduled posts. Read-only. Posted rows include posted_tweet_id (use it to link/tag the live tweet). " +
+        "since= filters on last update, so polling with since catches pending→posted transitions.",
+      inputSchema: {
+        status: z.enum(["draft", "pending", "posting", "posted", "failed", "canceled"]).optional().describe("Filter by status"),
+        since: z.string().optional().describe("ISO 8601 timestamp — only rows updated at/after this time"),
+        limit: z.number().int().min(1).max(200).optional().describe("Max rows (default 100)"),
+      },
+    },
+    async (args) => {
+      const result = await nonceTools.list_scheduled.handler(args ?? {});
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "cancel_scheduled",
+    {
+      description:
+        "Cancel a pending vibedraft scheduled post before it fires (canceling any thread member cancels the whole thread). " +
+        "Safe direction — prevents a post; no confirmation needed. Fails with 'only pending' if it already posted or is posting.",
+      inputSchema: {
+        id: z.string().describe("The scheduled post id (from schedule_post or list_scheduled)"),
+      },
+    },
+    async (args) => {
+      const result = await nonceTools.cancel_scheduled.handler(args);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   );

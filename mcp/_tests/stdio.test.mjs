@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 
 const serverPath = join(dirname(fileURLToPath(import.meta.url)), "..", "server.mjs");
 
-test("server completes an MCP stdio handshake and lists all four tools", async () => {
+test("server completes an MCP stdio handshake and lists every tool", async () => {
   const child = spawn(process.execPath, [serverPath], {
     env: {
       HOME: process.env.HOME,
@@ -73,7 +73,7 @@ test("server completes an MCP stdio handshake and lists all four tools", async (
     const byName = Object.fromEntries(list.result.tools.map((t) => [t.name, t]));
     assert.deepEqual(
       Object.keys(byName).sort(),
-      ["auth_instructions", "authorize", "preview_post", "publish_post"],
+      ["auth_instructions", "authorize", "cancel_scheduled", "list_scheduled", "preview_post", "publish_post", "schedule_post"],
     );
     // Schemas must survive the zod → JSON Schema round-trip with params intact.
     for (const tool of ["preview_post", "publish_post"]) {
@@ -81,6 +81,9 @@ test("server completes an MCP stdio handshake and lists all four tools", async (
       assert.ok(byName[tool].inputSchema?.properties?.thread, `${tool} exposes 'thread'`);
     }
     assert.ok(byName.publish_post.inputSchema.properties.confirm_nonce, "publish_post exposes 'confirm_nonce'");
+    assert.ok(byName.schedule_post.inputSchema?.properties?.scheduled_for, "schedule_post exposes 'scheduled_for'");
+    assert.ok(byName.schedule_post.inputSchema?.properties?.confirm_nonce, "schedule_post exposes 'confirm_nonce'");
+    assert.ok(byName.cancel_scheduled.inputSchema?.properties?.id, "cancel_scheduled exposes 'id'");
 
     // authorize: starts a local listener (ephemeral port via X_AUTH_PORT=0) and
     // returns a clickable X authorize link. No network I/O happens here.
