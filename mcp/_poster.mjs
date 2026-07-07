@@ -13,7 +13,11 @@ export const PRICE_PER_POST = 0.015;
 export const PRICE_PER_POST_WITH_URL = 0.20;
 export const API_BASE = "https://api.x.com";
 export const MEDIA_UPLOAD_URL = `${API_BASE}/2/media/upload`;
-const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB per segment — X's APPEND limit
+// 4 MB per APPEND segment. X's limit applies to the whole multipart request, and a full
+// 5 MB chunk plus form framing exceeds it: X answers 413 on segment 0 for any video over
+// one chunk (hit live 2026-07-07 with a 7.6 MB mp4). 4 MB leaves headroom for the boundary
+// and headers while staying safely under the cap. Exported for the chunk-math test.
+export const CHUNK_SIZE = 4 * 1024 * 1024;
 
 // X's media size caps (docs.x.com): 5 MB for static images, 15 MB for GIF.
 export const IMAGE_MAX_BYTES = { "image/gif": 15 * 1024 * 1024, default: 5 * 1024 * 1024 };
