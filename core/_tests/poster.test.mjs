@@ -158,3 +158,49 @@ test("buildPlan: video absent → hasVideo false, videoBytes undefined", () => {
   assert.equal(p.video, null);
   assert.equal(p.videoBytes, undefined);
 });
+
+// --- chunked video upload: OUR side of the APPEND contract ------------------
+// X 413s when a single APPEND request exceeds ~5 MB (chunk + multipart framing),
+// so every chunk we cut must stay at CHUNK_SIZE = 4 MB with headroom to spare.
+// This tests our chunk math only — endpoint correctness is provable only live (see #46).
+import { uploadVideoChunked, CHUNK_SIZE } from "../poster.mjs";
+
+test("CHUNK_SIZE leaves multipart headroom under X's 5 MB request cap", () => {
+  assert.ok(CHUNK_SIZE <= 4 * 1024 * 1024, `CHUNK_SIZE ${CHUNK_SIZE} must be ≤ 4 MB`);
+});
+
+test("uploadVideoChunked: >5MB file is cut into ≤CHUNK_SIZE segments covering every byte", async (t) => {
+  const path = join(tmpdir(), `xp-chunk-test-${process.pid}.bin`);
+  const totalBytes = 7_600_000; // mirrors the 7.6 MB mp4 that 413'd live
+  writeFileSync(path, Buffer.alloc(totalBytes, 7));
+  t.after(() => rmSync(path, { force: true }));
+
+  const appended = []; // [{index, bytes}]
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.endsWith("/initialize")) {
+      return { ok: true, json: async () => ({ data: { id: "m1" } }) };
+    }
+    if (u.includes("/append")) {
+      const form = opts.body;
+      const blob = form.get("media");
+      appended.push({ index: Number(form.get("segment_index")), bytes: blob.size });
+      return { ok: true, json: async () => ({}) };
+    }
+    if (u.endsWith("/finalize")) {
+      return { ok: true, json: async () => ({ data: {} }) }; // no processing_info → no STATUS poll
+    }
+    throw new Error(`unexpected fetch in test: ${u}`);
+  };
+  t.after(() => { globalThis.fetch = origFetch; });
+
+  const mediaId = await uploadVideoChunked(path, "token");
+  assert.equal(mediaId, "m1");
+  assert.equal(appended.length, Math.ceil(totalBytes / CHUNK_SIZE));
+  appended.forEach((seg, i) => {
+    assert.equal(seg.index, i, "segments are ordered");
+    assert.ok(seg.bytes <= CHUNK_SIZE, `segment ${i} is ${seg.bytes} bytes, over CHUNK_SIZE`);
+  });
+  assert.equal(appended.reduce((a, s) => a + s.bytes, 0), totalBytes, "segments cover the whole file");
+});
