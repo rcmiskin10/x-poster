@@ -1,7 +1,7 @@
 ---
-description: "Draft (or take) a tweet/thread, optionally attach an image, score it against a built-in bookmarkability rubric, preview the cost, and post to X — ONLY after you explicitly confirm. Never auto-publishes. Can also SCHEDULE for later via vibedraft (text only). X pay-per-use (~$0.015/post, ~$0.20/post-with-URL)."
-argument-hint: "<text to post | 'draft a post about X'> [--image <path>] [--reply-to <tweet-id>] [--at <ISO time | 'tomorrow 9am'>]"
-allowed-tools: ["Read", "Bash", "mcp__x-poster__preview_post", "mcp__x-poster__publish_post", "mcp__x-poster__schedule_post", "mcp__x-poster__list_scheduled", "mcp__x-poster__cancel_scheduled", "mcp__x-poster__authorize", "mcp__x-poster__auth_instructions"]
+description: "Draft (or take) a tweet/thread, optionally attach an image, score it against a built-in bookmarkability rubric, preview the cost, and post to X — ONLY after you explicitly confirm. Never auto-publishes. Can also SCHEDULE for later via vibedraft (text only), including BULK-scheduling up to 20 posts in one confirmed action. X pay-per-use (~$0.015/post, ~$0.20/post-with-URL)."
+argument-hint: "<text to post | 'draft a post about X' | 'draft N posts about X and schedule them across the week'> [--image <path>] [--reply-to <tweet-id>] [--at <ISO time | 'tomorrow 9am'>]"
+allowed-tools: ["Read", "Bash", "mcp__x-poster__preview_post", "mcp__x-poster__publish_post", "mcp__x-poster__preview_bulk", "mcp__x-poster__schedule_bulk", "mcp__x-poster__schedule_post", "mcp__x-poster__list_scheduled", "mcp__x-poster__cancel_scheduled", "mcp__x-poster__authorize", "mcp__x-poster__auth_instructions"]
 ---
 
 # /x-poster:x-post
@@ -20,6 +20,12 @@ one-line emoji status so the user always knows where the workflow is.
 - A future time is named (`--at`, "at 9am", "tomorrow", "schedule for …") → add `📅 mode: schedule`
   to the route line. Scheduling is TEXT-ONLY (no image/video — vibedraft's API v1 has no media);
   if media was also requested, say so and ask: post now with media, or schedule without it.
+- MULTIPLE independent posts with times ("draft 5 posts and schedule them across the week",
+  "schedule these 10, one per morning") → `📅 mode: bulk-schedule` (max 20 per batch). Compute each
+  post's concrete time yourself: resolve the user's spacing intent ("3/day at 9am/1pm/6pm starting
+  tomorrow") to per-post ISO 8601 timestamps **with the user's local UTC offset** — the tools
+  reject offset-less times. Keep items ≥30 min apart when posting order matters (vibedraft jitters
+  each post ±a few min independently).
 
 LLM work happens ONLY on the draft route (and the image screen). Everything else is plumbing —
 do not editorialize, score, or reformat on the fast route.
@@ -52,6 +58,20 @@ do not editorialize, score, or reformat on the fast route.
      minutes (deliberate humanization).
    Relay the `render` block verbatim either way.
 
+### Bulk-schedule mode (steps 3-5 replaced)
+
+3. `🔍 preview` — call `preview_bulk` with the full batch: `posts: [{text|thread, scheduled_for,
+   in_reply_to?}]` (1-20 items, each at its own offset-bearing ISO time). Relay `render` VERBATIM
+   — it lists every post, its time, per-item + total cost. If `errors` is non-empty, fix and
+   re-preview; validation is all-or-nothing (one bad item blocks the whole batch, nothing submits).
+4. `🚦 gate` — STOP. One explicit confirmation covers the whole batch. Content edits need a fresh
+   preview (the nonce freezes batch content); moving TIMES alone does not.
+5. `📅 schedule` — `schedule_bulk` with the SAME posts + the batch `confirm_nonce`. Relay `render`
+   verbatim. It reports per-item results: on partial failure, tell the user exactly what was
+   scheduled (with ids) vs failed/skipped, and offer `cancel_scheduled <id>` or a retry batch of
+   only the failed items. An `unknown` item means a network blip — check `list_scheduled` BEFORE
+   resubmitting it (never blind-resubmit).
+
 Managing the queue (no gate — read-only / safe direction):
 - "what's scheduled?" → `list_scheduled` (posted rows include `posted_tweet_id`).
 - "cancel <id> / cancel that" → `cancel_scheduled` (pending rows only; canceling any thread
@@ -68,8 +88,9 @@ to preview, then `--confirm` to post (after the same gate), where
 `ENV_FILE="${CLAUDE_PLUGIN_OPTION_ENV_FILE:-$X_ENV_FILE}"` and `X_ENV_FILE="$ENV_FILE"` is also
 exported on the posting call so rotated tokens persist. Flags: `--text "<tweet>"` or
 `--thread "<t1>" "<t2>" …`, `--image <abs-path>`. Scheduling: `--at <ISO>` (with `--confirm`),
-`--list-scheduled [--status <s>]`, `--cancel <id>`. Same gate, same rules. (Replies are
-MCP-only — the CLI has no `--reply-to`.)
+`--bulk <posts.json>` (up to 20 posts, each with its own `scheduled_for`; dry-run without
+`--confirm`), `--list-scheduled [--status <s>]`, `--cancel <id>`. Same gate, same rules.
+(Replies are MCP-only — the CLI has no `--reply-to`.)
 
 ## Guardrails
 

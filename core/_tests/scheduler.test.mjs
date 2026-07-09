@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   resolveVibedraftConfig,
   validateSchedule,
+  validateBulkSchedule,
   makeScheduleClient,
   SCHEDULE_POSTS_MAX,
+  BULK_ITEMS_MAX,
 } from "../scheduler.mjs";
 
 const NOW = new Date("2026-07-06T12:00:00.000Z");
@@ -197,4 +199,187 @@ test("client: network failure names the base URL", async () => {
   const impl = async () => { throw new Error("ECONNREFUSED"); };
   const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
   await assert.rejects(() => client.listScheduled(), /could not reach vibedraft at https:\/\/vibedraft\.app/);
+});
+
+test("client: API errors carry machine-readable status + apiCode", async () => {
+  const { impl } = mockFetch(() => ({ status: 422, body: { error: "validation_failed", message: "bad" } }));
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  try {
+    await client.listScheduled();
+    assert.fail("should have thrown");
+  } catch (e) {
+    assert.equal(e.status, 422);
+    assert.equal(e.apiCode, "validation_failed");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// validateBulkSchedule
+// ---------------------------------------------------------------------------
+
+const ITEM = { tweets: ["hi"], scheduledFor: IN_3H };
+
+test("bulk validate: happy path — mixed singles and threads", () => {
+  assert.deepEqual(
+    validateBulkSchedule(
+      [ITEM, { tweets: ["a", "b"], scheduledFor: "2026-07-07T09:00:00+02:00" }],
+      NOW,
+    ),
+    [],
+  );
+});
+
+test("bulk validate: empty and over-cap arrays", () => {
+  assert.deepEqual(validateBulkSchedule([], NOW), ["no posts provided"]);
+  assert.deepEqual(validateBulkSchedule(undefined, NOW), ["no posts provided"]);
+  const over = Array.from({ length: BULK_ITEMS_MAX + 1 }, () => ITEM);
+  assert.ok(validateBulkSchedule(over, NOW)[0].includes(`capped at ${BULK_ITEMS_MAX}`));
+  assert.deepEqual(validateBulkSchedule(Array.from({ length: BULK_ITEMS_MAX }, () => ITEM), NOW), []);
+});
+
+test("bulk validate: per-item errors carry a 'post N:' prefix", () => {
+  const errs = validateBulkSchedule(
+    [ITEM, { tweets: [], scheduledFor: IN_3H }, { tweets: ["x"], scheduledFor: "not-a-date" }],
+    NOW,
+  );
+  assert.ok(errs.some((e) => e.startsWith("post 2: ") && /no tweets/.test(e)));
+  assert.ok(errs.some((e) => e.startsWith("post 3: ") && /ISO 8601/.test(e)));
+  assert.ok(!errs.some((e) => e.startsWith("post 1: ")));
+});
+
+test("bulk validate: offset-less scheduled_for is rejected (bulk is stricter)", () => {
+  const errs = validateBulkSchedule([{ tweets: ["x"], scheduledFor: "2026-07-06T15:00:00" }], NOW);
+  assert.ok(errs.some((e) => /explicit UTC offset or Z/.test(e)));
+  // Both Z and numeric offsets are fine
+  assert.deepEqual(
+    validateBulkSchedule(
+      [
+        { tweets: ["x"], scheduledFor: "2026-07-06T15:00:00Z" },
+        { tweets: ["x"], scheduledFor: "2026-07-06T15:00:00-07:00" },
+      ],
+      NOW,
+    ),
+    [],
+  );
+});
+
+test("bulk validate: reply constraints apply per item", () => {
+  const errs = validateBulkSchedule(
+    [{ tweets: ["a", "b"], scheduledFor: IN_3H, inReplyTo: "123" }],
+    NOW,
+  );
+  assert.ok(errs.some((e) => e.startsWith("post 1: ") && /single scheduled post/.test(e)));
+});
+
+// ---------------------------------------------------------------------------
+// scheduleBulk — sequential loop, per-item results, abort semantics
+// ---------------------------------------------------------------------------
+
+function bulkItems(n) {
+  return Array.from({ length: n }, (_, i) => ({
+    tweets: [`post ${i + 1}`],
+    scheduledFor: `2026-07-0${(i % 3) + 7}T0${i % 10}:00:00Z`,
+  }));
+}
+
+test("bulk client: all-success preserves order and captures jittered times + ids", async () => {
+  let n = 0;
+  const { impl, calls } = mockFetch(() => {
+    n += 1;
+    return { status: 201, body: { posts: [{ id: `p${n}`, scheduled_for: `jittered-${n}` }] } };
+  });
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  const out = await client.scheduleBulk({ items: bulkItems(3) });
+  assert.equal(calls.length, 3);
+  assert.equal(out.scheduledCount, 3);
+  assert.equal(out.failedCount, 0);
+  assert.equal(out.aborted, false);
+  assert.deepEqual(out.results.map((r) => r.status), ["scheduled", "scheduled", "scheduled"]);
+  assert.deepEqual(out.results.map((r) => r.ids), [["p1"], ["p2"], ["p3"]]);
+  assert.deepEqual(out.results.map((r) => r.scheduled_for), ["jittered-1", "jittered-2", "jittered-3"]);
+  // sequential: item 1's body went first
+  assert.equal(JSON.parse(calls[0].init.body).posts[0].content, "post 1");
+});
+
+test("bulk client: per-item 422 records failure and continues", async () => {
+  let n = 0;
+  const { impl, calls } = mockFetch(() => {
+    n += 1;
+    if (n === 2) return { status: 422, body: { error: "validation_failed", message: "bad time" } };
+    return { status: 201, body: { posts: [{ id: `p${n}` }] } };
+  });
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  const out = await client.scheduleBulk({ items: bulkItems(3) });
+  assert.equal(calls.length, 3); // item 3 still attempted
+  assert.equal(out.scheduledCount, 2);
+  assert.equal(out.failedCount, 1);
+  assert.equal(out.aborted, false);
+  assert.equal(out.results[1].status, "failed");
+  assert.match(out.results[1].error, /bad time/);
+});
+
+test("bulk client: fatal code aborts — remaining items skipped, never sent", async () => {
+  let n = 0;
+  const { impl, calls } = mockFetch(() => {
+    n += 1;
+    if (n === 2) return { status: 401, body: { error: "invalid_token" } };
+    return { status: 201, body: { posts: [{ id: `p${n}` }] } };
+  });
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  const out = await client.scheduleBulk({ items: bulkItems(4) });
+  assert.equal(calls.length, 2); // items 3+4 never sent
+  assert.equal(out.aborted, true);
+  assert.match(out.abortReason, /revoked or expired/);
+  assert.deepEqual(out.results.map((r) => r.status), ["scheduled", "failed", "skipped", "skipped"]);
+  assert.match(out.results[2].error, /not attempted/);
+});
+
+test("bulk client: 429 sleeps and retries the SAME item, then succeeds", async () => {
+  const sleeps = [];
+  let n = 0;
+  const { impl, calls } = mockFetch(() => {
+    n += 1;
+    if (n === 1) return { status: 429, body: { error: "rate_limited" } };
+    return { status: 201, body: { posts: [{ id: `p${n}` }] } };
+  });
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  const out = await client.scheduleBulk({
+    items: bulkItems(2),
+    sleepImpl: async (ms) => sleeps.push(ms),
+  });
+  assert.equal(calls.length, 3); // item1 twice + item2 once
+  assert.deepEqual(sleeps, [10_000]);
+  assert.equal(out.scheduledCount, 2);
+  assert.equal(out.aborted, false);
+  // retried call resent the same content
+  assert.equal(JSON.parse(calls[1].init.body).posts[0].content, "post 1");
+});
+
+test("bulk client: persistent 429 exhausts retries then aborts", async () => {
+  const sleeps = [];
+  const { impl, calls } = mockFetch(() => ({ status: 429, body: { error: "rate_limited" } }));
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  const out = await client.scheduleBulk({
+    items: bulkItems(3),
+    sleepImpl: async (ms) => sleeps.push(ms),
+  });
+  assert.equal(calls.length, 3); // 1 attempt + 2 retries, all on item 1
+  assert.equal(sleeps.length, 2);
+  assert.deepEqual(out.results.map((r) => r.status), ["failed", "skipped", "skipped"]);
+  assert.equal(out.aborted, true);
+});
+
+test("bulk client: network error marks the item unknown and aborts", async () => {
+  let n = 0;
+  const impl = async (url, init) => {
+    n += 1;
+    if (n === 2) throw new Error("socket hang up");
+    return { ok: true, status: 201, json: async () => ({ posts: [{ id: `p${n}` }] }) };
+  };
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  const out = await client.scheduleBulk({ items: bulkItems(3) });
+  assert.equal(n, 2);
+  assert.deepEqual(out.results.map((r) => r.status), ["scheduled", "unknown", "skipped"]);
+  assert.match(out.results[1].error, /list_scheduled before resubmitting/);
+  assert.equal(out.aborted, true);
 });

@@ -73,7 +73,7 @@ test("server completes an MCP stdio handshake and lists every tool", async () =>
     const byName = Object.fromEntries(list.result.tools.map((t) => [t.name, t]));
     assert.deepEqual(
       Object.keys(byName).sort(),
-      ["auth_instructions", "authorize", "cancel_scheduled", "list_scheduled", "preview_post", "publish_post", "schedule_post"],
+      ["auth_instructions", "authorize", "cancel_scheduled", "list_scheduled", "preview_bulk", "preview_post", "publish_post", "schedule_bulk", "schedule_post"],
     );
     // Schemas must survive the zod → JSON Schema round-trip with params intact.
     for (const tool of ["preview_post", "publish_post"]) {
@@ -84,6 +84,9 @@ test("server completes an MCP stdio handshake and lists every tool", async () =>
     assert.ok(byName.schedule_post.inputSchema?.properties?.scheduled_for, "schedule_post exposes 'scheduled_for'");
     assert.ok(byName.schedule_post.inputSchema?.properties?.confirm_nonce, "schedule_post exposes 'confirm_nonce'");
     assert.ok(byName.cancel_scheduled.inputSchema?.properties?.id, "cancel_scheduled exposes 'id'");
+    assert.ok(byName.preview_bulk.inputSchema?.properties?.posts, "preview_bulk exposes 'posts'");
+    assert.ok(byName.schedule_bulk.inputSchema?.properties?.posts, "schedule_bulk exposes 'posts'");
+    assert.ok(byName.schedule_bulk.inputSchema?.properties?.confirm_nonce, "schedule_bulk exposes 'confirm_nonce'");
 
     // authorize: starts a local listener (ephemeral port via X_AUTH_PORT=0) and
     // returns a clickable X authorize link. No network I/O happens here.

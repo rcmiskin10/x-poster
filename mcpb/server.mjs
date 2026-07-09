@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { buildPlan, costEstimate, containsUrl, postCost, resolveMaxChars, STANDARD_TWEET_CHARS, LONGFORM_TWEET_CHARS } from "./_poster.mjs";
 import { makeTokenStore } from "./_token-store.mjs";
 import { startAuthSession } from "./_auth.mjs";
-import { resolveVibedraftConfig, validateSchedule, makeScheduleClient } from "./_scheduler.mjs";
+import { resolveVibedraftConfig, validateSchedule, validateBulkSchedule, makeScheduleClient, BULK_ITEMS_MAX } from "./_scheduler.mjs";
 
 // ---------------------------------------------------------------------------
 // loadEnvFile — minimal KEY=VALUE parser (mirrors the CLI's X_ENV_FILE support
@@ -57,15 +57,24 @@ function makeNonceFns(secret) {
     return JSON.stringify({ tweets, image: image || null, in_reply_to: inReplyTo || null, video: video || null });
   }
 
-  function mintNonce(tweets, image, inReplyTo, video) {
+  // Bulk canonical wraps under a distinct top-level key so a single-post nonce
+  // can never verify for a bulk payload or vice versa. Content-bound, TIME-FREE
+  // (same semantics as single-post: content is frozen at the nonce; the times
+  // are chosen at confirm).
+  function canonicalBulk(items) {
+    return JSON.stringify({
+      bulk: items.map((it) => ({ tweets: it.tweets, in_reply_to: it.inReplyTo || null })),
+    });
+  }
+
+  function mintFor(payload) {
     const ts = Date.now();
-    const payload = canonical(tweets, image, inReplyTo, video);
     const sig = createHmac("sha256", secret).update(`${payload}.${ts}`).digest("hex");
     const hash = createHmac("sha256", secret).update(payload).digest("hex");
     return `${hash}.${ts}.${sig}`;
   }
 
-  function verifyNonce(nonce, tweets, image, inReplyTo, video) {
+  function verifyFor(nonce, payload) {
     if (!nonce || typeof nonce !== "string") return false;
     const parts = nonce.split(".");
     // Format: payloadHash.ts.sig — sig (64-char hex) last, ts second-to-last, payloadHash everything before.
@@ -77,7 +86,6 @@ function makeNonceFns(secret) {
     if (isNaN(ts)) return false;
     if (Date.now() - ts >= 600_000) return false; // 10-min TTL
 
-    const payload = canonical(tweets, image, inReplyTo, video);
     const expectedHash = createHmac("sha256", secret).update(payload).digest("hex");
     const expectedSig = createHmac("sha256", secret).update(`${payload}.${ts}`).digest("hex");
 
@@ -93,7 +101,12 @@ function makeNonceFns(secret) {
     return hashMatch && sigMatch;
   }
 
-  return { mintNonce, verifyNonce };
+  const mintNonce = (tweets, image, inReplyTo, video) => mintFor(canonical(tweets, image, inReplyTo, video));
+  const verifyNonce = (nonce, tweets, image, inReplyTo, video) => verifyFor(nonce, canonical(tweets, image, inReplyTo, video));
+  const mintBulkNonce = (items) => mintFor(canonicalBulk(items));
+  const verifyBulkNonce = (nonce, items) => verifyFor(nonce, canonicalBulk(items));
+
+  return { mintNonce, verifyNonce, mintBulkNonce, verifyBulkNonce };
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +142,23 @@ function normalize({ text, thread }) {
 
   const tweets = hasThread ? thread : [text];
   return tweets;
+}
+
+// normalizeBulk: posts[] → [{tweets, scheduledFor, inReplyTo}], all-or-nothing.
+function normalizeBulk(posts) {
+  if (!Array.isArray(posts) || posts.length === 0) throw new Error("provide a posts array with 1-" + BULK_ITEMS_MAX + " items");
+  const errors = [];
+  const items = posts.map((p, i) => {
+    try {
+      const tweets = normalize({ text: p?.text, thread: p?.thread });
+      return { tweets, scheduledFor: p?.scheduled_for, inReplyTo: p?.in_reply_to || null };
+    } catch (e) {
+      errors.push(`post ${i + 1}: ${e.message}`);
+      return null;
+    }
+  });
+  if (errors.length) throw new Error(errors.join("; "));
+  return items;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +209,67 @@ export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasI
 }
 
 // ---------------------------------------------------------------------------
+// renderBulkDashboard — the bulk sibling of renderDashboard. One line per item;
+// clients relay it VERBATIM. stage: "preview" | "scheduled"
+// items: [{tweets, scheduledFor, estimatedCostUsd}]; results align by index
+// (scheduled stage only, from core scheduleBulk).
+// ---------------------------------------------------------------------------
+
+const BULK_SNIPPET_CHARS = 40;
+
+function bulkSnippet(tweets) {
+  const first = (tweets[0] ?? "").replace(/\s+/g, " ").trim();
+  return first.length > BULK_SNIPPET_CHARS ? `${first.slice(0, BULK_SNIPPET_CHARS)}…` : first;
+}
+
+export function renderBulkDashboard({ stage, items, totalEstimatedCostUsd, errors = [], results = [], aborted = false }) {
+  const header = `🐦 x-poster ▸ bulk ×${items.length}`;
+  const rule = "─".repeat(44);
+  const pad = (n) => String(n).padStart(2, " ");
+
+  const lines = [header, rule];
+  if (stage === "scheduled") {
+    const byIndex = new Map(results.map((r) => [r.index, r]));
+    items.forEach((it, i) => {
+      const r = byIndex.get(i);
+      const mark =
+        r?.status === "scheduled" ? `✅ ${r.scheduled_for} · id ${r.ids?.[0]}`
+        : r?.status === "failed" ? `❌ ${r.error}`
+        : r?.status === "unknown" ? `❓ ${r.error}`
+        : "⏭ skipped";
+      lines.push(`${pad(i + 1)}│ ${mark} · ${bulkSnippet(it.tweets)}`);
+    });
+  } else {
+    items.forEach((it, i) => {
+      const kind = it.tweets.length > 1 ? `thread ×${it.tweets.length}` : "post";
+      lines.push(`${pad(i + 1)}│ ${it.scheduledFor} · ${kind} · $${it.estimatedCostUsd.toFixed(3)} · ${bulkSnippet(it.tweets)}`);
+    });
+  }
+  lines.push(rule);
+
+  const ok = errors.length === 0;
+  const totalTweets = items.reduce((n, it) => n + it.tweets.length, 0);
+  if (stage === "scheduled") {
+    const scheduled = results.filter((r) => r.ok).length;
+    const failed = results.length - scheduled;
+    lines.push(failed === 0 ? "✅ resolve   ✅ validate   ✅ gate   📅 scheduled" : "✅ resolve   ✅ validate   ✅ gate   ⚠️ partial");
+    lines.push(`📅 ${scheduled}/${items.length} scheduled${failed ? ` · ${failed} not scheduled` : ""}${aborted ? " · batch aborted early" : ""}`);
+    lines.push(`💸 est. $${totalEstimatedCostUsd.toFixed(3)} total at post time (billed via vibedraft's X app)`);
+    if (failed) lines.push("🧹 recovery: fix the failed items and re-run preview_bulk with ONLY them; cancel_scheduled <id> removes any scheduled one");
+  } else if (ok) {
+    lines.push("✅ resolve   ✅ validate   🟡 gate   ⚪ schedule");
+    lines.push(`📝 ${items.length} posts · ${totalTweets} tweets · 💸 est. $${totalEstimatedCostUsd.toFixed(3)} total at post time`);
+    lines.push(`🕰 times may shift ±a few min (vibedraft humanization jitter)`);
+    lines.push(`🚦 awaiting explicit confirmation — reply "ship it" to schedule all ${items.length}`);
+  } else {
+    lines.push("✅ resolve   ❌ validate   ⚪ gate   ⚪ schedule");
+    for (const e of errors) lines.push(`⚠️ ${e}`);
+    lines.push("⛔ fix validation errors, then preview_bulk again — nothing was submitted");
+  }
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // makeTools — pure factory; no SDK, no network required
 // deps = { postThread, statePath, elicit?, maxChars?, getScheduleClient? }
 //   postThread(tweets, image?, inReplyTo?, video?) → ids[]   (injected; may be mock)
@@ -202,7 +293,7 @@ export function makeTools(deps) {
 
   // Per-factory random secret for nonces
   const nonceSecret = randomBytes(32);
-  const { mintNonce, verifyNonce } = makeNonceFns(nonceSecret);
+  const { mintNonce, verifyNonce, mintBulkNonce, verifyBulkNonce } = makeNonceFns(nonceSecret);
 
   // -------------------------------------------------------------------------
   // preview_post — PURE, zero network
@@ -334,6 +425,82 @@ export function makeTools(deps) {
   }
 
   // -------------------------------------------------------------------------
+  // preview_bulk / schedule_bulk — up to BULK_ITEMS_MAX independent posts,
+  // each at its own time, in ONE confirmed action. Client-side loop over the
+  // vibedraft API (its posts[] is a thread, not a bulk list). Validation is
+  // all-or-nothing; submission reports per-item results and never throws on
+  // partial failure so the caller can relay what happened + how to recover.
+  // -------------------------------------------------------------------------
+  function planBulk(posts) {
+    const items = normalizeBulk(posts);
+    const errors = validateBulkSchedule(items);
+    const withPlans = items.map((it, i) => {
+      const plan = buildPlan({ tweets: it.tweets, dryRun: true, maxChars });
+      errors.push(...plan.errors.map((e) => `post ${i + 1}: ${e}`));
+      return { ...it, perPost: plan.perPost, estimatedCostUsd: plan.estimatedCostUsd };
+    });
+    const totalEstimatedCostUsd = withPlans.reduce((s, it) => s + it.estimatedCostUsd, 0);
+    return { items: withPlans, errors, totalEstimatedCostUsd };
+  }
+
+  async function previewBulkHandler({ posts }) {
+    const { items, errors, totalEstimatedCostUsd } = planBulk(posts);
+    const confirm_nonce = mintBulkNonce(items);
+    return {
+      items: items.map((it) => ({
+        tweets: it.tweets,
+        scheduled_for: it.scheduledFor,
+        in_reply_to: it.inReplyTo,
+        perPost: it.perPost,
+        estimatedCostUsd: it.estimatedCostUsd,
+      })),
+      totalEstimatedCostUsd,
+      errors,
+      confirm_nonce,
+      render: renderBulkDashboard({ stage: "preview", items, totalEstimatedCostUsd, errors }),
+    };
+  }
+
+  async function scheduleBulkHandler({ posts, confirm_nonce }) {
+    const { items, errors, totalEstimatedCostUsd } = planBulk(posts);
+    if (errors.length) throw new Error(errors.join("; "));
+
+    // Confirmation gate — same branches as schedule_post. The bulk nonce is
+    // content-bound (not time-bound) and cannot cross-verify with single-post
+    // nonces. Elicit message truncates each item for display; the gate still
+    // covers the full payload because this handler re-validated it above.
+    if (typeof elicit === "function") {
+      const rendered = items
+        .map((it, i) => {
+          const first = it.tweets.join(" / ");
+          const snippet = first.length > 80 ? `${first.slice(0, 80)}…` : first;
+          return `${i + 1}. [${it.scheduledFor}] ${snippet}`;
+        })
+        .join("\n");
+      const approved = await elicit({ rendered: `Bulk schedule ${items.length} posts:\n${rendered}`, costUsd: totalEstimatedCostUsd });
+      if (!approved) throw new Error("user declined");
+    } else {
+      if (!verifyBulkNonce(confirm_nonce, items)) {
+        throw new Error("missing/invalid confirm_nonce — call preview_bulk first to get a nonce");
+      }
+    }
+
+    const client = getScheduleClient();
+    const out = await client.scheduleBulk({ items });
+    return {
+      ...out,
+      totalEstimatedCostUsd,
+      render: renderBulkDashboard({
+        stage: "scheduled",
+        items,
+        totalEstimatedCostUsd,
+        results: out.results,
+        aborted: out.aborted,
+      }),
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // list_scheduled — read-only; how callers learn posted_tweet_id
   // -------------------------------------------------------------------------
   async function listScheduledHandler({ status, since, limit } = {}) {
@@ -382,6 +549,8 @@ export function makeTools(deps) {
     preview_post: { handler: previewHandler },
     publish_post: { handler: publishHandler },
     schedule_post: { handler: scheduleHandler },
+    preview_bulk: { handler: previewBulkHandler },
+    schedule_bulk: { handler: scheduleBulkHandler },
     list_scheduled: { handler: listScheduledHandler },
     cancel_scheduled: { handler: cancelScheduledHandler },
     auth_instructions: { handler: authHandler },
@@ -615,6 +784,75 @@ export async function startServer() {
         tools = nonceTools;
       }
       const result = await tools.schedule_post.handler(args);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  // Shared zod shape for a bulk item — text|thread (exactly one), an explicit
+  // offset-bearing time, optional reply target.
+  const bulkPostShape = z.object({
+    text: z.string().optional().describe("Single tweet text (mutually exclusive with thread)"),
+    thread: z.array(z.string()).optional().describe("Array of 2-6 tweet texts for a thread (mutually exclusive with text)"),
+    scheduled_for: z.string().describe("ISO 8601 timestamp WITH an explicit offset or Z — each post gets its own time; must be >2 minutes and <30 days from now"),
+    in_reply_to: z.string().optional().describe("Existing tweet ID to reply to — single post only"),
+  });
+
+  server.registerTool(
+    "preview_bulk",
+    {
+      description:
+        `Preview a bulk batch of up to ${BULK_ITEMS_MAX} independent X posts (each its own time) to be scheduled via vibedraft. ` +
+        "Text only — no media. Returns per-item validation + cost, a total, a confirm_nonce for schedule_bulk, and a `render` dashboard block — show `render` to the user VERBATIM. PURE — no network I/O.",
+      inputSchema: {
+        posts: z.array(bulkPostShape).min(1).max(BULK_ITEMS_MAX).describe(`1-${BULK_ITEMS_MAX} posts, each {text|thread, scheduled_for, in_reply_to?}`),
+      },
+    },
+    async (args) => {
+      const result = await nonceTools.preview_bulk.handler(args);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "schedule_bulk",
+    {
+      description:
+        `Schedule up to ${BULK_ITEMS_MAX} independent X posts (each at its own time) via the user's vibedraft account, in one confirmed action. Text only — no media. ` +
+        "Validation is all-or-nothing (a half-valid batch submits nothing); submission reports per-item results and does NOT throw on partial failure — relay failures and offer cancel_scheduled recovery. " +
+        "Requires a valid confirm_nonce from preview_bulk for the SAME posts (content is frozen at the nonce; times may be adjusted before confirming). " +
+        "vibedraft applies ±a few minutes of humanization jitter per post. Returns a `render` dashboard block — show it VERBATIM.",
+      inputSchema: {
+        posts: z.array(bulkPostShape).min(1).max(BULK_ITEMS_MAX).describe(`1-${BULK_ITEMS_MAX} posts, each {text|thread, scheduled_for, in_reply_to?}`),
+        confirm_nonce: z.string().optional().describe("Nonce issued by preview_bulk for the SAME posts. Required when client does not support elicitation."),
+      },
+    },
+    async (args, ctx) => {
+      const supportsElicitation = !!ctx?.clientCapabilities?.elicitation;
+      let tools;
+      if (supportsElicitation) {
+        const elicit = async ({ rendered, costUsd }) => {
+          const result = await ctx.mcpReq.elicitInput({
+            mode: "form",
+            message: `Confirm BULK SCHEDULING via vibedraft:\n\n${rendered}\n\nTotal estimated cost at post time: $${costUsd.toFixed(3)}`,
+            requestedSchema: {
+              type: "object",
+              properties: {
+                confirm: {
+                  type: "boolean",
+                  title: "Confirm bulk schedule",
+                  description: "Set to true to approve scheduling ALL listed posts",
+                },
+              },
+              required: ["confirm"],
+            },
+          });
+          return result.action === "accept" && result.content?.confirm === true;
+        };
+        tools = buildTools(elicit);
+      } else {
+        tools = nonceTools;
+      }
+      const result = await tools.schedule_bulk.handler(args);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   );

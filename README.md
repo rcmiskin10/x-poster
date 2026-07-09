@@ -217,6 +217,40 @@ node --env-file=./x-poster.env x-post.mjs --cancel <id>
 Note: vibedraft nudges `scheduled_for` by ±a few minutes (per your vibedraft humanization setting),
 so the stored time may differ slightly from what you asked for. That's a feature.
 
+### Bulk scheduling — up to 20 posts in one confirmed action
+
+Draft a week of content, schedule it all at once. Each item is an independent post (or 2-6-tweet
+thread) at **its own time** — `{text|thread, scheduled_for, in_reply_to?}`, max **20 per call**.
+Text only, same as single scheduling. Times must be ISO 8601 **with an explicit offset or `Z`**
+(stricter than single scheduling on purpose — 20 posts silently landing an hour off is the bulk
+footgun).
+
+In chat: `preview_bulk` shows every post, its time, per-item + total cost, and mints one
+`confirm_nonce` for the whole batch; after you say "ship it", `schedule_bulk` submits. The nonce
+freezes the batch **content** (you can still adjust times between preview and confirm); validation
+is all-or-nothing — one invalid item and nothing submits.
+
+```bash
+# CLI flavor: a JSON file of posts; without --confirm it's a dry-run that schedules nothing
+node --env-file=./x-poster.env x-post.mjs --bulk ./posts.json
+node --env-file=./x-poster.env x-post.mjs --confirm --bulk ./posts.json
+```
+
+```json
+{ "posts": [
+  { "text": "monday 9am post", "scheduled_for": "2026-07-13T09:00:00-07:00" },
+  { "thread": ["tuesday thread 1/2", "2/2"], "scheduled_for": "2026-07-14T09:00:00-07:00" }
+] }
+```
+
+Submission is item-by-item (the vibedraft API takes one post/thread per call), so a batch can
+**partially succeed**: the result lists per-item statuses — `scheduled` (with ids), `failed`,
+`skipped` (batch aborted early on a fatal error like a revoked token), or `unknown` (network blip;
+check `list_scheduled` before resubmitting — never blind-retry). Recovery is surgical:
+`cancel_scheduled <id>` removes anything you didn't want, and re-running with only the failed items
+finishes the job. Two practical notes: jitter applies per post, so keep items ≥30 min apart if
+posting order matters, and vibedraft caps pending posts at 720 per account.
+
 ### The one video gotcha — silent clips
 
 X's transcoder can **reject a video with no audio track**. Screen recordings are often silent, so if

@@ -96,7 +96,9 @@ test("CLI: parseArgs wires every flagged capability", () => {
 
 test("CLI: parsed media args actually reach buildPlan and postThread", () => {
   // parseArgs proving the flag exists is not enough — the value must flow through.
-  const buildPlanCall = CLI_SRC.match(/buildPlan\(\{[\s\S]*?\}\)/)?.[0] ?? "";
+  // Anchor on the main-path call (tweets: args.tweets) — the bulk branch has its
+  // own per-item buildPlan calls that intentionally carry no media.
+  const buildPlanCall = CLI_SRC.match(/buildPlan\(\{ tweets: args\.tweets[\s\S]*?\}\)/)?.[0] ?? "";
   const postThreadCall = CLI_SRC.match(/await postThread\([\s\S]*?\)/)?.[0] ?? "";
   for (const key of ["image", "video"]) {
     assert.match(buildPlanCall, new RegExp(`\\b${key}: args\\.${key}\\b`),
@@ -207,6 +209,45 @@ test("MCP: scheduling tools registered with schemas; schedule_post keeps the non
 test("MCP: makeTools exposes the schedule handler family", () => {
   const tools = makeTools({ postThread: async () => ["1"], statePath: "/tmp/parity-x" });
   for (const name of ["schedule_post", "list_scheduled", "cancel_scheduled"]) {
+    assert.equal(typeof tools[name]?.handler, "function", `makeTools missing ${name}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Bulk scheduling surface (v1.8.0 — up to BULK_ITEMS_MAX independent posts per
+// call, each at its own time, one confirmed action).
+// ---------------------------------------------------------------------------
+
+test("core: bulk scheduler exports exist and the client exposes scheduleBulk", async () => {
+  const scheduler = await import("../scheduler.mjs");
+  assert.equal(typeof scheduler.validateBulkSchedule, "function", "validateBulkSchedule missing from core");
+  assert.equal(scheduler.BULK_ITEMS_MAX, 20, "BULK_ITEMS_MAX missing from core (or cap changed silently)");
+  const client = scheduler.makeScheduleClient({ baseUrl: "https://x", token: "t", fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
+  assert.equal(typeof client.scheduleBulk, "function", "makeScheduleClient client is missing scheduleBulk");
+});
+
+test("CLI: parseArgs wires --bulk and the value flows to scheduleBulk", () => {
+  assert.equal(parseArgs(["--bulk", "posts.json"]).bulk, "posts.json",
+    "CLI drift: --bulk does not populate .bulk — bulk scheduling would silently no-op");
+  assert.match(CLI_SRC, /scheduleBulk\(\{ items \}\)/,
+    "CLI drift: --bulk is parsed but never calls client.scheduleBulk");
+  assert.match(CLI_SRC, /validateBulkSchedule\(/,
+    "CLI drift: bulk path skips validateBulkSchedule");
+});
+
+test("MCP: bulk tools registered with schemas; schedule_bulk keeps the nonce gate", () => {
+  for (const toolName of ["preview_bulk", "schedule_bulk"]) {
+    const block = registerToolBlock(toolName);
+    assert.match(block, /\bposts: z\./,
+      `MCP drift: ${toolName} schema is missing the posts array`);
+  }
+  assert.match(registerToolBlock("schedule_bulk"), /\bconfirm_nonce: z\./,
+    "MCP drift: schedule_bulk schema lost the confirm_nonce gate field");
+});
+
+test("MCP: makeTools exposes the bulk handler pair", () => {
+  const tools = makeTools({ postThread: async () => ["1"], statePath: "/tmp/parity-x" });
+  for (const name of ["preview_bulk", "schedule_bulk"]) {
     assert.equal(typeof tools[name]?.handler, "function", `makeTools missing ${name}`);
   }
 });

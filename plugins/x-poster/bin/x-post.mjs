@@ -23,17 +23,19 @@
 // Scheduling (via vibedraft's API — needs VIBEDRAFT_API_URL + VIBEDRAFT_API_TOKEN in the env file;
 //   text only, no media; posts go out through YOUR vibedraft-connected X account):
 //   node --env-file=./your.env x-post.mjs --confirm --at 2026-07-08T09:00:00Z --text "..."   # schedule instead of post
+//   node --env-file=./your.env x-post.mjs --bulk ./posts.json [--confirm]                    # bulk-schedule up to 20 posts, each at its own time
+//     (posts.json = {"posts":[{"text":"...","scheduled_for":"2026-07-10T09:00:00Z"}, ...]}; without --confirm it's a dry-run)
 //   node --env-file=./your.env x-post.mjs --list-scheduled [--status pending]                # list rows (posted → posted_tweet_id)
 //   node --env-file=./your.env x-post.mjs --cancel <id>                                      # cancel a pending row
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { buildPlan, postThread, uploadMedia, refreshAccessToken, persistRefreshToken, resolveMaxChars } from "./_poster.mjs";
-import { resolveVibedraftConfig, validateSchedule, makeScheduleClient } from "./_scheduler.mjs";
+import { resolveVibedraftConfig, validateSchedule, validateBulkSchedule, makeScheduleClient } from "./_scheduler.mjs";
 
 // ---- CLI entry (only when run directly, not when imported by tests) ----
 export function parseArgs(argv) { // exported for core/_tests/surface-parity.test.mjs
-  const out = { dryRun: false, confirm: false, tweets: [], image: undefined, video: undefined, uploadOnly: false, at: undefined, listScheduled: false, status: undefined, since: undefined, cancel: undefined };
+  const out = { dryRun: false, confirm: false, tweets: [], image: undefined, video: undefined, uploadOnly: false, at: undefined, bulk: undefined, listScheduled: false, status: undefined, since: undefined, cancel: undefined };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") out.dryRun = true;
@@ -42,6 +44,7 @@ export function parseArgs(argv) { // exported for core/_tests/surface-parity.tes
     else if (a === "--video") out.video = argv[++i];
     else if (a === "--upload-only") { out.uploadOnly = true; out.image = argv[++i]; } // upload media, print id, no post
     else if (a === "--at") out.at = argv[++i]; // schedule via vibedraft instead of posting now
+    else if (a === "--bulk") out.bulk = argv[++i]; // JSON file of posts to bulk-schedule via vibedraft
     else if (a === "--list-scheduled") out.listScheduled = true;
     else if (a === "--status") out.status = argv[++i];
     else if (a === "--since") out.since = argv[++i];
@@ -109,6 +112,59 @@ async function main() {
   }
 
   const maxChars = resolveMaxChars(process.env.X_MAX_TWEET_CHARS);
+
+  // Bulk schedule path — up to 20 independent posts from a JSON file, each at
+  // its own offset-bearing ISO time. Same explicit gate as posting: --confirm
+  // required; without it (or with --dry-run) the plan prints and NOTHING is
+  // scheduled. Validation is all-or-nothing — one bad item blocks the batch.
+  if (args.bulk) {
+    let spec;
+    try {
+      spec = JSON.parse(readFileSync(args.bulk, "utf8"));
+    } catch (e) {
+      console.error(`ERROR: could not read bulk file ${args.bulk}: ${e.message}`);
+      process.exit(2);
+    }
+    if (!Array.isArray(spec?.posts) || spec.posts.length === 0) {
+      console.error(`ERROR: ${args.bulk} must contain {"posts": [{"text"|"thread", "scheduled_for", "in_reply_to"?}, ...]}`);
+      process.exit(2);
+    }
+    const shapeErrors = [];
+    const items = spec.posts.map((p, i) => {
+      const hasText = p?.text !== undefined && p?.text !== null;
+      const hasThread = Array.isArray(p?.thread) && p.thread.length > 0;
+      if (hasText === hasThread) {
+        shapeErrors.push(`post ${i + 1}: provide either text or thread${hasText ? ", not both" : ""}`);
+        return null;
+      }
+      return { tweets: hasThread ? p.thread : [p.text], scheduledFor: p?.scheduled_for, inReplyTo: p?.in_reply_to || null };
+    });
+    if (shapeErrors.length) { console.error("VALIDATION ERRORS:", shapeErrors.join("; ")); process.exit(2); }
+
+    const errors = validateBulkSchedule(items);
+    const perItem = items.map((it, i) => {
+      const itemPlan = buildPlan({ tweets: it.tweets, dryRun: true, maxChars });
+      errors.push(...itemPlan.errors.map((e) => `post ${i + 1}: ${e}`));
+      return itemPlan;
+    });
+    if (errors.length) { console.error("VALIDATION ERRORS:", errors.join("; ")); process.exit(2); }
+
+    const totalEstimatedCostUsd = perItem.reduce((s, p) => s + p.estimatedCostUsd, 0);
+    if (!args.confirm || args.dryRun) {
+      console.log(JSON.stringify({
+        wouldSchedule: items.map((it, i) => ({ scheduled_for: it.scheduledFor, tweets: it.tweets, estimatedCostUsd: perItem[i].estimatedCostUsd })),
+        totalEstimatedCostUsdAtPostTime: totalEstimatedCostUsd,
+      }, null, 2));
+      console.error(`NOT SCHEDULING ${items.length} post(s) (${args.dryRun ? "dry-run" : "missing --confirm"}).`);
+      return;
+    }
+    const out = await scheduleClientOrExit().scheduleBulk({ items });
+    console.log(JSON.stringify(out, null, 2));
+    console.error(`Scheduled ${out.scheduledCount}/${items.length} via vibedraft${out.aborted ? ` — ABORTED EARLY: ${out.abortReason}` : ""}.`);
+    if (out.failedCount > 0 || out.aborted) process.exit(1);
+    return;
+  }
+
   const plan = buildPlan({ tweets: args.tweets, dryRun: args.dryRun, confirm: args.confirm, hasCreds, image: args.image, video: args.video, maxChars });
 
   // Schedule path — same explicit gate as posting: --confirm required, dry-run
