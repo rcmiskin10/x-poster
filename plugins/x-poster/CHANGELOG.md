@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.8.0
+- **Bulk scheduling: up to 20 posts in one confirmed action.** New MCP tool pair `preview_bulk` /
+  `schedule_bulk` and CLI flag `--bulk <posts.json>`. Each item is an independent post or 2-6-tweet
+  thread at its own time (`{text|thread, scheduled_for, in_reply_to?}`); submission loops the
+  vibedraft API item-by-item. Validation is all-or-nothing; results are per-item
+  (`scheduled`/`failed`/`skipped`/`unknown`) and the batch aborts early on fatal errors (revoked
+  token, pending cap) or a network blip — never blind-retrying an ambiguous failure. 429s are
+  retried after a wait (safe: rejected pre-insert).
+- **Bulk confirm gate.** `preview_bulk` mints one HMAC nonce over the whole batch content
+  (time-free, like single scheduling); a bulk nonce can never authorize `schedule_post` or vice
+  versa. Elicitation-capable clients confirm in-form with a truncated per-item listing.
+- **Stricter bulk time validation.** Every `scheduled_for` must carry an explicit UTC offset or `Z`.
+- **`.mcpb` manifest catch-up.** The manifest now lists the v1.7.0 scheduling tools
+  (`schedule_post`, `list_scheduled`, `cancel_scheduled`) plus the new bulk pair in `tools[]`, and
+  adds optional `VIBEDRAFT_API_URL` / `VIBEDRAFT_API_TOKEN` install fields so the Claude Desktop
+  connector can schedule without an env file.
+
+## 1.7.1
+- **Fix: videos larger than 5 MB failed to upload** (X media API 413) — the APPEND limit applies to
+  the whole multipart request, so chunks are now 4 MB to leave headroom for form framing.
+
+## 1.7.0
+- **Schedule posts for later via vibedraft.** MCP tools `schedule_post`, `list_scheduled`,
+  `cancel_scheduled`; CLI flags `--at <ISO>`, `--list-scheduled`, `--cancel <id>`. Same
+  content-frozen confirmation gate as publishing; vibedraft's cron posts even if the machine is
+  asleep. Setup: `VIBEDRAFT_API_URL` + `VIBEDRAFT_API_TOKEN` (Settings → API tokens). Text only.
+
 ## 1.6.0
 - **Native video upload via chunked API.** Attach a `.mp4` to the first tweet of any post or thread
   using the `--video` CLI flag or the `video` MCP parameter. Upload uses X's dedicated v2 chunked

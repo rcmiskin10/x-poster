@@ -1,8 +1,8 @@
 {
   "manifest_version": "0.3",
   "name": "x-poster",
-  "version": "1.7.1",
-  "description": "Post a tweet or thread (with optional image) to X. Preview cost first; never auto-publishes.",
+  "version": "1.8.0",
+  "description": "Post a tweet or thread (with optional image) to X, or schedule posts — one or up to 20 in bulk — via vibedraft. Preview cost first; never auto-publishes.",
   "author": { "name": "rcmisk" },
   "license": "MIT",
   "server": {
@@ -16,13 +16,20 @@
         "X_CLIENT_SECRET": "${user_config.X_CLIENT_SECRET}",
         "X_REFRESH_TOKEN": "${user_config.X_REFRESH_TOKEN}",
         "X_AUTH_PORT": "${user_config.X_AUTH_PORT}",
-        "X_MAX_TWEET_CHARS": "${user_config.X_MAX_TWEET_CHARS}"
+        "X_MAX_TWEET_CHARS": "${user_config.X_MAX_TWEET_CHARS}",
+        "VIBEDRAFT_API_URL": "${user_config.VIBEDRAFT_API_URL}",
+        "VIBEDRAFT_API_TOKEN": "${user_config.VIBEDRAFT_API_TOKEN}"
       }
     }
   },
   "tools": [
     { "name": "preview_post", "description": "Validate + cost-preview a tweet/thread. No side effects." },
     { "name": "publish_post", "description": "Post to X after explicit confirmation. The only writer." },
+    { "name": "preview_bulk", "description": "Validate + cost-preview up to 20 posts to bulk-schedule via vibedraft. No side effects." },
+    { "name": "schedule_bulk", "description": "Schedule up to 20 posts (each at its own time) via vibedraft after explicit confirmation." },
+    { "name": "schedule_post", "description": "Schedule a post/thread for a future time via vibedraft after explicit confirmation." },
+    { "name": "list_scheduled", "description": "List vibedraft scheduled posts (read-only)." },
+    { "name": "cancel_scheduled", "description": "Cancel a pending vibedraft scheduled post before it fires." },
     { "name": "authorize", "description": "Connect your X account — returns a link to click. One-time, no terminal." },
     { "name": "auth_instructions", "description": "Setup help (X app checklist + auth options)." }
   ],
@@ -58,6 +65,19 @@
       "type": "string",
       "title": "Max characters per post (optional)",
       "description": "Leave blank — character count won't block posting (long-form X Premium content works, and X enforces your account's real limit when you post). Set this to 280 only if you want the classic limit enforced locally before posting.",
+      "required": false
+    },
+    "VIBEDRAFT_API_URL": {
+      "type": "string",
+      "title": "vibedraft API URL (optional, for scheduling)",
+      "description": "Leave blank unless you schedule posts via vibedraft. Usually https://vibedraft.app — scheduling tools (schedule_post, schedule_bulk, list_scheduled, cancel_scheduled) need this plus the token below.",
+      "required": false
+    },
+    "VIBEDRAFT_API_TOKEN": {
+      "type": "string",
+      "title": "vibedraft API token (optional, for scheduling)",
+      "description": "Leave blank unless you schedule posts via vibedraft. Create a Personal Access Token (vd_pat_...) in vibedraft under Settings → API tokens with posts:read + posts:write scopes.",
+      "sensitive": true,
       "required": false
     }
   }
