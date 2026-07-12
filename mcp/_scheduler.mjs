@@ -9,14 +9,41 @@
 //   DELETE /api/v1/scheduled-posts/:id  — cancel a pending row (whole thread)
 //
 // Scheduling posts via the USER's vibedraft X connection — cost is billed to
-// vibedraft's X app at dispatch time, not to x-poster's app. Media is NOT
-// supported by the API's v1 (no upload endpoint); validateSchedule rejects it
-// up front so the media never silently drops.
+// vibedraft's X app at dispatch time, not to x-poster's app. Media rides along
+// via the v1 media API (three steps, because Vercel's ~4.5MB request-body cap
+// rules out proxying bytes through a route):
+//   POST /api/v1/media                → media_id + a signed direct-to-storage URL
+//   PUT  <signed_url>                 → the bytes (straight to Supabase storage)
+//   POST /api/v1/media/{id}/complete  → marks the row ready
+// then media_id goes on the FIRST post of the scheduled thread; the dispatcher
+// attaches it at post time. Bulk stays text-only (rejected up front, never
+// silently dropped).
+
+import { existsSync, statSync, readFileSync } from "node:fs";
 
 export const SCHEDULE_POSTS_MAX = 6; // mirrors the API's thread cap
 export const BULK_ITEMS_MAX = 20; // bulk cap: max independent posts per scheduleBulk call
 const MIN_LEAD_MS = 2 * 60_000; // API rejects <= now+2min; fail fast client-side
 const MAX_AHEAD_MS = 30 * 24 * 60 * 60_000; // API rejects > 30 days out
+
+// vibedraft's media limits (mirrors its v1 media API validation): images share
+// X's 5MB static-image cap; mp4 matches X's 512MB ceiling. No GIF — vibedraft's
+// pipeline doesn't carry it.
+export const SCHEDULE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+export const SCHEDULE_VIDEO_MAX_BYTES = 512 * 1024 * 1024;
+export const SCHEDULE_MEDIA_TYPES = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  mp4: "video/mp4",
+};
+
+// Map a path to the mime type vibedraft accepts for scheduling, or null.
+export function scheduleMediaMime(p) {
+  const ext = (String(p).split(".").pop() || "").toLowerCase();
+  return SCHEDULE_MEDIA_TYPES[ext] ?? null;
+}
 
 // The API's posts[] is a THREAD (one shared time), so bulk = one POST per item.
 // Codes where the whole batch is doomed — abort instead of burning 19 more calls.
@@ -56,11 +83,35 @@ export function resolveVibedraftConfig(env = {}, fileEnv = {}) {
 export function validateSchedule({ tweets, scheduledFor, inReplyTo, image, video }, now = new Date()) {
   const errors = [];
 
-  if (image || video) {
-    errors.push(
-      "scheduled posts don't support media yet (vibedraft API v1 has no upload " +
-        "endpoint) — drop the attachment, or post now instead of scheduling",
-    );
+  if (image && video) {
+    errors.push("image and video are mutually exclusive; pass one or the other");
+  }
+  const media = image || video;
+  if (media) {
+    const mime = scheduleMediaMime(media);
+    const mb = (n) => (n / 1024 / 1024).toFixed(1).replace(/\.0$/, "");
+    if (!existsSync(media)) {
+      // Same wording as buildPlan so composed callers dedupe to one line.
+      errors.push(`${image ? "image" : "video"} not found: ${media}`);
+    } else if (!mime) {
+      errors.push(
+        `unsupported media type for scheduling: ${media} — vibedraft accepts ` +
+          "jpg/jpeg/png/webp images and .mp4 video",
+      );
+    } else if (image && !mime.startsWith("image/")) {
+      errors.push(`image must be jpg/jpeg/png/webp (got ${mime}) — pass a .mp4 as video instead`);
+    } else if (video && mime !== "video/mp4") {
+      errors.push(`video must be .mp4 (got ${mime})`);
+    } else {
+      const size = statSync(media).size;
+      const limit = mime === "video/mp4" ? SCHEDULE_VIDEO_MAX_BYTES : SCHEDULE_IMAGE_MAX_BYTES;
+      if (size > limit) {
+        errors.push(
+          `media is too large (${mb(size)} MB, over vibedraft's ${mb(limit)} MB limit for ${mime}). ` +
+            "Compress it, or post now instead of scheduling.",
+        );
+      }
+    }
   }
 
   if (!Array.isArray(tweets) || tweets.length === 0) {
@@ -109,7 +160,13 @@ export function validateBulkSchedule(items, now = new Date()) {
   const errors = [];
   for (const [i, item] of items.entries()) {
     const prefix = `post ${i + 1}: `;
-    for (const e of validateSchedule(item ?? {}, now)) errors.push(prefix + e);
+    // Bulk is text-only by design (one upload per item would turn a 20-post
+    // batch into 60+ network calls with partial-failure ambiguity). Reject
+    // explicitly so media never silently drops.
+    if (item?.image || item?.video) {
+      errors.push(`${prefix}bulk scheduling is text-only — schedule posts with media one at a time`);
+    }
+    for (const e of validateSchedule({ ...(item ?? {}), image: undefined, video: undefined }, now)) errors.push(prefix + e);
     const sf = item?.scheduledFor;
     if (typeof sf === "string" && !Number.isNaN(new Date(sf).getTime()) && !/(Z|[+-]\d{2}:?\d{2})$/.test(sf)) {
       errors.push(`${prefix}scheduled_for must include an explicit UTC offset or Z (got: ${sf})`);
@@ -142,6 +199,15 @@ function describeApiError(status, body) {
       return "no scheduled post with that id (or it belongs to a different vibedraft user).";
     case "rate_limited":
       return "vibedraft rate-limited the token — wait a minute and retry.";
+    case "unsupported_media_type":
+      return `vibedraft rejected the media type${detail} — jpg/jpeg/png/webp images (≤5 MB) and .mp4 video are supported.`;
+    case "media_too_large":
+      return `the media file exceeds vibedraft's size limit${detail}.`;
+    case "media_not_found":
+    case "media_not_ready":
+      return `the media_id doesn't reference a completed upload${detail} — upload the file again and use the fresh media_id.`;
+    case "upload_incomplete":
+      return `vibedraft could not verify the uploaded bytes${detail} — retry the upload from the start.`;
     case "validation_failed":
       return `vibedraft rejected the request${detail}.`;
     default:
@@ -186,13 +252,79 @@ export function makeScheduleClient({ baseUrl, token, fetchImpl = fetch }) {
   }
 
   /**
+   * Upload a media file for scheduling. Three steps against vibedraft's v1
+   * media API: init (metadata → media_id + signed URL), a direct PUT of the
+   * bytes to Supabase storage (bypasses Vercel's ~4.5MB body cap), complete
+   * (server verifies the object and marks the row ready). Returns
+   * { mediaId, media } — pass mediaId to schedulePosts.
+   * Caller should validateSchedule first; this re-derives mime from the path
+   * and fails fast on unsupported types so a raw call can't upload garbage.
+   */
+  async function uploadMedia({ filePath, readFileImpl = readFileSync }) {
+    const mimeType = scheduleMediaMime(filePath);
+    if (!mimeType) {
+      throw new Error(
+        `unsupported media type for scheduling: ${filePath} — vibedraft accepts ` +
+          "jpg/jpeg/png/webp images and .mp4 video",
+      );
+    }
+    let bytes;
+    try {
+      bytes = readFileImpl(filePath);
+    } catch (e) {
+      throw new Error(`could not read media file ${filePath}: ${e.message}`);
+    }
+
+    const init = await api("/media", {
+      method: "POST",
+      body: JSON.stringify({ mime_type: mimeType, size_bytes: bytes.length }),
+    });
+    const mediaId = init?.media_id;
+    const upload = init?.upload ?? {};
+    if (!mediaId || !upload.signed_url) {
+      throw new Error(`vibedraft media init returned no media_id/signed_url: ${JSON.stringify(init)}`);
+    }
+
+    // Bytes go straight to storage with the signed URL — NOT through api()
+    // (absolute URL, no bearer; auth is the signed token). If the API returns
+    // the token separately and the URL doesn't already carry it, append it
+    // (Supabase's uploadToSignedUrl query-param convention).
+    let putUrl = upload.signed_url;
+    if (upload.token && !/[?&]token=/.test(putUrl)) {
+      putUrl += (putUrl.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(upload.token);
+    }
+    let putRes;
+    try {
+      putRes = await fetchImpl(putUrl, {
+        method: "PUT",
+        headers: { "Content-Type": mimeType },
+        body: bytes,
+      });
+    } catch (e) {
+      throw new Error(`media upload to storage failed: ${e.message}`);
+    }
+    if (!putRes.ok) {
+      let detail = "";
+      try { detail = JSON.stringify(await putRes.json()); } catch { /* non-JSON error body */ }
+      throw new Error(`media upload to storage failed: ${putRes.status}${detail ? ` ${detail}` : ""}`);
+    }
+
+    const done = await api(`/media/${encodeURIComponent(mediaId)}/complete`, { method: "POST" });
+    return { mediaId: String(done?.media?.id ?? mediaId), media: done?.media ?? null };
+  }
+
+  /**
    * Schedule a standalone post (1 tweet) or a thread (2-6 tweets) at an ISO
    * time. Returns the created rows — note scheduled_for may differ slightly
    * from the request: vibedraft applies the user's humanization jitter.
+   * mediaId (optional, from uploadMedia) attaches to the FIRST post only —
+   * mirrors publish, where media rides on the root tweet.
    */
-  async function schedulePosts({ tweets, scheduledFor, inReplyTo }) {
+  async function schedulePosts({ tweets, scheduledFor, inReplyTo, mediaId }) {
     const body = {
-      posts: tweets.map((content) => ({ content })),
+      posts: tweets.map((content, i) =>
+        i === 0 && mediaId ? { content, media_id: String(mediaId) } : { content },
+      ),
       scheduled_for: scheduledFor,
       ...(inReplyTo ? { in_reply_to_tweet_id: String(inReplyTo) } : {}),
     };
@@ -272,6 +404,7 @@ export function makeScheduleClient({ baseUrl, token, fetchImpl = fetch }) {
   }
 
   return {
+    uploadMedia,
     schedulePosts,
     scheduleBulk,
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "x-poster",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Post a tweet or thread (with optional image) to X, or schedule posts — one or up to 20 in bulk — via vibedraft. Preview cost first; never auto-publishes.",
   "author": { "name": "rcmisk" },
   "license": "MIT",

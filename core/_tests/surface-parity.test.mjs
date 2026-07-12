@@ -214,6 +214,61 @@ test("MCP: makeTools exposes the schedule handler family", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Scheduled-media surface (v1.9.0 — image/video on schedule_post via the
+// vibedraft v1 media API). Same drift class as the --video incident: every
+// surface must WIRE the capability, not just parse it.
+// ---------------------------------------------------------------------------
+
+test("core: scheduler media exports exist and the client exposes uploadMedia", async () => {
+  const scheduler = await import("../scheduler.mjs");
+  assert.equal(typeof scheduler.scheduleMediaMime, "function", "scheduleMediaMime missing from core");
+  assert.ok(scheduler.SCHEDULE_IMAGE_MAX_BYTES > 0, "SCHEDULE_IMAGE_MAX_BYTES missing from core");
+  assert.ok(scheduler.SCHEDULE_VIDEO_MAX_BYTES > 0, "SCHEDULE_VIDEO_MAX_BYTES missing from core");
+  const client = scheduler.makeScheduleClient({ baseUrl: "https://x", token: "t", fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
+  assert.equal(typeof client.uploadMedia, "function", "makeScheduleClient client is missing uploadMedia");
+});
+
+test("CLI: --at path threads media to uploadMedia and mediaId to schedulePosts", () => {
+  // parseArgs already wires --image/--video (asserted above); the schedule
+  // branch must USE them — upload first, then pass the id on.
+  assert.match(CLI_SRC, /client\.uploadMedia\(\{ filePath: media \}\)/,
+    "CLI drift: --at accepts media but never calls client.uploadMedia — it would schedule text-only silently");
+  assert.match(CLI_SRC, /schedulePosts\(\{ tweets: args\.tweets, scheduledFor: args\.at, mediaId \}\)/,
+    "CLI drift: uploaded media_id is not passed to schedulePosts");
+});
+
+test("MCP: schedule_post schema declares image + video and the handler threads them", async () => {
+  const block = registerToolBlock("schedule_post");
+  for (const field of ["image", "video"]) {
+    assert.match(block, new RegExp(`\\b${field}: z\\.`),
+      `MCP drift: schedule_post schema is missing "${field}" — models cannot schedule with media even though core supports it`);
+  }
+
+  // Behavioral: preview nonce with video → schedule uploads then passes mediaId.
+  const clip = join(tmpdir(), `parity-sched-clip-${process.pid}.mp4`);
+  writeFileSync(clip, Buffer.alloc(1024));
+  try {
+    const calls = { upload: [], schedule: [] };
+    const tools = makeTools({
+      postThread: async () => { throw new Error("scheduling must not post directly"); },
+      statePath: join(tmpdir(), `parity-sched-state-${process.pid}`),
+      getScheduleClient: () => ({
+        uploadMedia: async (args) => { calls.upload.push(args); return { mediaId: "m-parity", media: null }; },
+        schedulePosts: async (args) => { calls.schedule.push(args); return [{ id: "row-1", scheduled_for: "t" }]; },
+      }),
+    });
+    const preview = await tools.preview_post.handler({ text: "hi", video: clip });
+    const inTwoHours = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+    await tools.schedule_post.handler({ text: "hi", video: clip, scheduled_for: inTwoHours, confirm_nonce: preview.confirm_nonce });
+    assert.equal(calls.upload.length, 1, "MCP drift: schedule_post accepted a video but never uploaded it");
+    assert.equal(calls.schedule[0]?.mediaId, "m-parity",
+      "MCP drift: schedule_post uploaded media but did not pass mediaId to schedulePosts");
+  } finally {
+    rmSync(clip, { force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Bulk scheduling surface (v1.8.0 — up to BULK_ITEMS_MAX independent posts per
 // call, each at its own time, one confirmed action).
 // ---------------------------------------------------------------------------

@@ -145,13 +145,16 @@ function normalize({ text, thread }) {
 }
 
 // normalizeBulk: posts[] → [{tweets, scheduledFor, inReplyTo}], all-or-nothing.
+// image/video ride along so validateBulkSchedule can REJECT them explicitly —
+// bulk is text-only, and dropping a media field silently is the --video-incident
+// failure class.
 function normalizeBulk(posts) {
   if (!Array.isArray(posts) || posts.length === 0) throw new Error("provide a posts array with 1-" + BULK_ITEMS_MAX + " items");
   const errors = [];
   const items = posts.map((p, i) => {
     try {
       const tweets = normalize({ text: p?.text, thread: p?.thread });
-      return { tweets, scheduledFor: p?.scheduled_for, inReplyTo: p?.in_reply_to || null };
+      return { tweets, scheduledFor: p?.scheduled_for, inReplyTo: p?.in_reply_to || null, image: p?.image || null, video: p?.video || null };
     } catch (e) {
       errors.push(`post ${i + 1}: ${e.message}`);
       return null;
@@ -168,7 +171,7 @@ function normalizeBulk(posts) {
 // stage: "preview" | "published" | "scheduled"
 // ---------------------------------------------------------------------------
 
-export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasImage, hasVideo, inReplyTo, errors = [], urls = [], scheduledFor = null, scheduledIds = [] }) {
+export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasImage, hasVideo, inReplyTo, errors = [], urls = [], scheduledFor = null, scheduledIds = [], mediaId = null }) {
   const isThread = tweets.length > 1;
   const kind = isThread ? `thread ×${tweets.length}` : "post";
   const header = `🐦 x-poster ▸ ${kind}${inReplyTo ? ` ▸ reply → ${inReplyTo}` : ""}`;
@@ -198,6 +201,7 @@ export function renderDashboard({ stage, tweets, perPost, estimatedCostUsd, hasI
     for (const u of urls) lines.push(`🚀 live: ${u}`);
   } else if (stage === "scheduled") {
     lines.push(`📅 fires at ${scheduledFor} (vibedraft may nudge by ±a few min to look human)`);
+    if (mediaId) lines.push(`📎 media uploaded to vibedraft (id ${mediaId}) — attaches to the first tweet at post time`);
     for (const id of scheduledIds) lines.push(`🗂 scheduled id: ${id}`);
   } else if (ok) {
     lines.push(`🚦 awaiting explicit confirmation — reply "ship it" to publish`);
@@ -371,55 +375,71 @@ export function makeTools(deps) {
 
   // -------------------------------------------------------------------------
   // schedule_post — writes to vibedraft, not X. Same human gate as publish:
-  // the preview_post nonce (bound to the exact tweets + in_reply_to, media
-  // null) must verify, or an elicitation-capable client confirms in-form.
-  // The user's "ship at T" IS the publish approval — content is frozen at
-  // the nonce; only the time is chosen at confirm.
+  // the preview_post nonce (bound to the exact tweets + image/video +
+  // in_reply_to) must verify, or an elicitation-capable client confirms
+  // in-form. The user's "ship at T" IS the publish approval — content is
+  // frozen at the nonce; only the time is chosen at confirm. Media is
+  // uploaded AFTER the gate (never spend an upload on an unconfirmed post)
+  // and attaches to the first tweet at dispatch time.
   // -------------------------------------------------------------------------
-  async function scheduleHandler({ text, thread, scheduled_for, in_reply_to, confirm_nonce }) {
+  async function scheduleHandler({ text, thread, scheduled_for, in_reply_to, image, video, confirm_nonce }) {
     const tweets = normalize({ text, thread });
 
-    const errors = validateSchedule({ tweets, scheduledFor: scheduled_for, inReplyTo: in_reply_to || null });
-    // Char-limit + cost come from the same planner as publish.
-    const plan = buildPlan({ tweets, dryRun: true, maxChars });
-    errors.push(...plan.errors);
+    const errors = validateSchedule({
+      tweets,
+      scheduledFor: scheduled_for,
+      inReplyTo: in_reply_to || null,
+      image: image || null,
+      video: video || null,
+    });
+    // Char-limit + cost come from the same planner as publish. Dedupe: both
+    // validators flag missing files / image+video exclusivity.
+    const plan = buildPlan({ tweets, dryRun: true, image: image || null, video: video || null, maxChars });
+    for (const e of plan.errors) if (!errors.includes(e)) errors.push(e);
     if (errors.length) throw new Error(errors.join("; "));
 
     // Confirmation gate — identical branches to publish_post. The nonce is the
-    // one preview_post minted for this exact payload (image/video null: media
-    // is unsupported for scheduling, so a media-bound nonce won't verify).
+    // one preview_post minted for this exact payload, media included.
     if (typeof elicit === "function") {
       const reply = in_reply_to ? `\n\n(reply to tweet ${in_reply_to})` : "";
-      const rendered = tweets.join("\n---\n") + reply + `\n\nSchedule for: ${scheduled_for}`;
+      const media = video ? `\n\n(attach video: ${video})` : image ? `\n\n(attach image: ${image})` : "";
+      const rendered = tweets.join("\n---\n") + reply + media + `\n\nSchedule for: ${scheduled_for}`;
       const approved = await elicit({ rendered, costUsd: plan.estimatedCostUsd });
       if (!approved) throw new Error("user declined");
     } else {
-      if (!verifyNonce(confirm_nonce, tweets, null, in_reply_to || null, null)) {
+      if (!verifyNonce(confirm_nonce, tweets, image || null, in_reply_to || null, video || null)) {
         throw new Error("missing/invalid confirm_nonce — call preview_post first to get a nonce");
       }
     }
 
     const client = getScheduleClient();
+    let mediaId = null;
+    if (image || video) {
+      ({ mediaId } = await client.uploadMedia({ filePath: image || video }));
+    }
     const rows = await client.schedulePosts({
       tweets,
       scheduledFor: scheduled_for,
       inReplyTo: in_reply_to || null,
+      ...(mediaId ? { mediaId } : {}),
     });
     // vibedraft applies the user's humanization jitter server-side.
     const actualFor = rows[0]?.scheduled_for ?? scheduled_for;
     return {
       scheduled: rows,
       scheduled_for: actualFor,
+      ...(mediaId ? { media_id: mediaId } : {}),
       render: renderDashboard({
         stage: "scheduled",
         tweets,
         perPost: plan.perPost,
         estimatedCostUsd: plan.estimatedCostUsd,
-        hasImage: false,
-        hasVideo: false,
+        hasImage: plan.hasImage,
+        hasVideo: plan.hasVideo,
         inReplyTo: in_reply_to || null,
         scheduledFor: actualFor,
         scheduledIds: rows.map((r) => r.id),
+        mediaId,
       }),
     };
   }
@@ -745,16 +765,18 @@ export async function startServer() {
     "schedule_post",
     {
       description:
-        "Schedule an X post or thread for a future time via the user's vibedraft account (text only — no media). " +
+        "Schedule an X post or thread for a future time via the user's vibedraft account. Supports one image (jpg/png/webp ≤5MB) or one .mp4 video (≤512MB) on the first tweet — uploaded to vibedraft at schedule time, attached at post time. " +
         "The cron dispatcher posts it at the scheduled time even if this machine is asleep. " +
-        "Requires a valid confirm_nonce from preview_post for the SAME text/thread — the user's 'ship it at <time>' is the approval; content is frozen at the nonce. " +
+        "Requires a valid confirm_nonce from preview_post for the SAME payload (text/thread + image/video + in_reply_to) — the user's 'ship it at <time>' is the approval; content is frozen at the nonce. " +
         "Returns a `render` dashboard block — show it to the user VERBATIM.",
       inputSchema: {
         text: z.string().optional().describe("Single tweet text (mutually exclusive with thread)"),
         thread: z.array(z.string()).optional().describe("Array of 2-6 tweet texts for a thread (mutually exclusive with text)"),
         scheduled_for: z.string().describe("ISO 8601 timestamp (with offset or Z) — must be >2 minutes and <30 days from now. vibedraft applies a small human-looking jitter."),
+        image: z.string().optional().describe("Absolute path to a jpg/png/webp image (≤5MB) to attach to the first tweet (mutually exclusive with video) — must match the image passed to preview_post"),
+        video: z.string().optional().describe("Absolute path to a .mp4 video (≤512MB) to attach to the first tweet (mutually exclusive with image) — must match the video passed to preview_post"),
         in_reply_to: z.string().optional().describe("Existing tweet ID to reply to — single post only, must match the in_reply_to passed to preview_post"),
-        confirm_nonce: z.string().optional().describe("Nonce issued by preview_post for the SAME payload (no image/video — media is unsupported for scheduling). Required when client does not support elicitation."),
+        confirm_nonce: z.string().optional().describe("Nonce issued by preview_post for the SAME payload, media included. Required when client does not support elicitation."),
       },
     },
     async (args, ctx) => {

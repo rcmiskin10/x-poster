@@ -21,9 +21,10 @@
 //   node --env-file=./your.env x-post.mjs --confirm --video ./clip.mp4 --text "..."   # video (mp4); image/video are mutually exclusive
 //
 // Scheduling (via vibedraft's API — needs VIBEDRAFT_API_URL + VIBEDRAFT_API_TOKEN in the env file;
-//   text only, no media; posts go out through YOUR vibedraft-connected X account):
+//   posts go out through YOUR vibedraft-connected X account):
 //   node --env-file=./your.env x-post.mjs --confirm --at 2026-07-08T09:00:00Z --text "..."   # schedule instead of post
-//   node --env-file=./your.env x-post.mjs --bulk ./posts.json [--confirm]                    # bulk-schedule up to 20 posts, each at its own time
+//   node --env-file=./your.env x-post.mjs --confirm --at ... --video ./clip.mp4 --text "..." # scheduled WITH media (image jpg/png/webp ≤5MB, or mp4 ≤512MB)
+//   node --env-file=./your.env x-post.mjs --bulk ./posts.json [--confirm]                    # bulk-schedule up to 20 posts, each at its own time (text only)
 //     (posts.json = {"posts":[{"text":"...","scheduled_for":"2026-07-10T09:00:00Z"}, ...]}; without --confirm it's a dry-run)
 //   node --env-file=./your.env x-post.mjs --list-scheduled [--status pending]                # list rows (posted → posted_tweet_id)
 //   node --env-file=./your.env x-post.mjs --cancel <id>                                      # cancel a pending row
@@ -137,7 +138,8 @@ async function main() {
         shapeErrors.push(`post ${i + 1}: provide either text or thread${hasText ? ", not both" : ""}`);
         return null;
       }
-      return { tweets: hasThread ? p.thread : [p.text], scheduledFor: p?.scheduled_for, inReplyTo: p?.in_reply_to || null };
+      // image/video ride along so validateBulkSchedule rejects them explicitly (bulk is text-only).
+      return { tweets: hasThread ? p.thread : [p.text], scheduledFor: p?.scheduled_for, inReplyTo: p?.in_reply_to || null, image: p?.image || null, video: p?.video || null };
     });
     if (shapeErrors.length) { console.error("VALIDATION ERRORS:", shapeErrors.join("; ")); process.exit(2); }
 
@@ -169,21 +171,28 @@ async function main() {
 
   // Schedule path — same explicit gate as posting: --confirm required, dry-run
   // prints the plan and schedules nothing. X creds are NOT required (vibedraft
-  // posts through the user's own connected X account). Media is rejected by
-  // validateSchedule (the API's v1 has no upload endpoint).
+  // posts through the user's own connected X account). --image/--video are
+  // uploaded to vibedraft AFTER the gate and attach to the first tweet at
+  // post time (jpg/png/webp ≤5MB, mp4 ≤512MB — validateSchedule enforces).
   if (args.at) {
-    const errors = [
-      ...validateSchedule({ tweets: args.tweets, scheduledFor: args.at, image: args.image, video: args.video }),
-      ...plan.errors,
-    ];
+    const errors = validateSchedule({ tweets: args.tweets, scheduledFor: args.at, image: args.image, video: args.video });
+    for (const e of plan.errors) if (!errors.includes(e)) errors.push(e);
     if (errors.length) { console.error("VALIDATION ERRORS:", errors.join("; ")); process.exit(2); }
+    const media = args.image || args.video;
     if (!args.confirm || args.dryRun) {
-      console.log(JSON.stringify({ wouldScheduleAt: args.at, tweets: args.tweets, estimatedCostUsdAtPostTime: plan.estimatedCostUsd }, null, 2));
+      console.log(JSON.stringify({ wouldScheduleAt: args.at, tweets: args.tweets, ...(media ? { media } : {}), estimatedCostUsdAtPostTime: plan.estimatedCostUsd }, null, 2));
       console.error(`NOT SCHEDULING (${args.dryRun ? "dry-run" : "missing --confirm"}).`);
       return;
     }
-    const rows = await scheduleClientOrExit().schedulePosts({ tweets: args.tweets, scheduledFor: args.at });
-    console.log(JSON.stringify({ scheduled: rows.map((r) => ({ id: r.id, scheduled_for: r.scheduled_for, status: r.status })) }, null, 2));
+    const client = scheduleClientOrExit();
+    let mediaId;
+    if (media) {
+      console.error(`Uploading ${args.video ? "video" : "image"} to vibedraft…`);
+      ({ mediaId } = await client.uploadMedia({ filePath: media }));
+      console.error(`Uploaded (media_id ${mediaId}) — it attaches to the first tweet at post time.`);
+    }
+    const rows = await client.schedulePosts({ tweets: args.tweets, scheduledFor: args.at, mediaId });
+    console.log(JSON.stringify({ scheduled: rows.map((r) => ({ id: r.id, scheduled_for: r.scheduled_for, status: r.status })), ...(mediaId ? { media_id: mediaId } : {}) }, null, 2));
     console.error(`Scheduled ${rows.length} row(s) via vibedraft — it posts even if this machine is asleep.`);
     return;
   }
