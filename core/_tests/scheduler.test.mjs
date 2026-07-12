@@ -1,16 +1,36 @@
-import { test } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   resolveVibedraftConfig,
   validateSchedule,
   validateBulkSchedule,
   makeScheduleClient,
+  scheduleMediaMime,
   SCHEDULE_POSTS_MAX,
   BULK_ITEMS_MAX,
+  SCHEDULE_IMAGE_MAX_BYTES,
 } from "../scheduler.mjs";
 
 const NOW = new Date("2026-07-06T12:00:00.000Z");
 const IN_3H = "2026-07-06T15:00:00.000Z";
+
+// Real temp files — validateSchedule stats them for size/type.
+const PNG = join(tmpdir(), `sched-media-${process.pid}.png`);
+const MP4 = join(tmpdir(), `sched-media-${process.pid}.mp4`);
+const GIF = join(tmpdir(), `sched-media-${process.pid}.gif`);
+const BIG_PNG = join(tmpdir(), `sched-media-big-${process.pid}.png`);
+before(() => {
+  writeFileSync(PNG, Buffer.alloc(1024));
+  writeFileSync(MP4, Buffer.alloc(2048));
+  writeFileSync(GIF, Buffer.alloc(64));
+  writeFileSync(BIG_PNG, Buffer.alloc(SCHEDULE_IMAGE_MAX_BYTES + 1));
+});
+after(() => {
+  for (const f of [PNG, MP4, GIF, BIG_PNG]) rmSync(f, { force: true });
+});
 
 // ---------------------------------------------------------------------------
 // resolveVibedraftConfig
@@ -55,17 +75,50 @@ test("validate: happy paths (single, thread, reply)", () => {
   );
 });
 
-test("validate: media is rejected up front (API v1 has no upload)", () => {
-  const errs = validateSchedule(
-    { tweets: ["x"], scheduledFor: IN_3H, image: "/a.png" },
-    NOW,
+test("validate: media happy paths (png image, mp4 video)", () => {
+  assert.deepEqual(validateSchedule({ tweets: ["x"], scheduledFor: IN_3H, image: PNG }, NOW), []);
+  assert.deepEqual(validateSchedule({ tweets: ["x"], scheduledFor: IN_3H, video: MP4 }, NOW), []);
+});
+
+test("validate: media matrix — missing, unsupported, wrong-flag, oversized, both", () => {
+  // missing-file wording matches buildPlan's ("image/video not found") so
+  // composed callers dedupe to one line
+  assert.ok(
+    validateSchedule({ tweets: ["x"], scheduledFor: IN_3H, image: "/nope.png" }, NOW)
+      .some((e) => /image not found/.test(e)),
   );
-  assert.ok(errs.some((e) => /media/.test(e)));
-  const errs2 = validateSchedule(
-    { tweets: ["x"], scheduledFor: IN_3H, video: "/a.mp4" },
-    NOW,
+  assert.ok(
+    validateSchedule({ tweets: ["x"], scheduledFor: IN_3H, video: "/nope.mp4" }, NOW)
+      .some((e) => /video not found/.test(e)),
   );
-  assert.ok(errs2.some((e) => /media/.test(e)));
+  assert.ok(
+    validateSchedule({ tweets: ["x"], scheduledFor: IN_3H, image: GIF }, NOW)
+      .some((e) => /unsupported media type/.test(e)),
+  );
+  assert.ok(
+    validateSchedule({ tweets: ["x"], scheduledFor: IN_3H, image: MP4 }, NOW)
+      .some((e) => /pass a \.mp4 as video/.test(e)),
+  );
+  assert.ok(
+    validateSchedule({ tweets: ["x"], scheduledFor: IN_3H, video: PNG }, NOW)
+      .some((e) => /video must be \.mp4/.test(e)),
+  );
+  assert.ok(
+    validateSchedule({ tweets: ["x"], scheduledFor: IN_3H, image: BIG_PNG }, NOW)
+      .some((e) => /too large/.test(e)),
+  );
+  assert.ok(
+    validateSchedule({ tweets: ["x"], scheduledFor: IN_3H, image: PNG, video: MP4 }, NOW)
+      .some((e) => /mutually exclusive/.test(e)),
+  );
+});
+
+test("scheduleMediaMime: extension map, case-insensitive, null for unknown", () => {
+  assert.equal(scheduleMediaMime("/a/b/clip.MP4"), "video/mp4");
+  assert.equal(scheduleMediaMime("shot.jpeg"), "image/jpeg");
+  assert.equal(scheduleMediaMime("shot.webp"), "image/webp");
+  assert.equal(scheduleMediaMime("anim.gif"), null);
+  assert.equal(scheduleMediaMime("noext"), null);
 });
 
 test("validate: tweet count and emptiness", () => {
@@ -178,6 +231,122 @@ test("client: cancelScheduled DELETEs by id and returns canceled ids", async () 
   assert.equal(calls[0].init.method, "DELETE");
 });
 
+test("client: schedulePosts puts media_id on the FIRST post only", async () => {
+  const { impl, calls } = mockFetch(() => ({ status: 201, body: { posts: [{ id: "p1" }] } }));
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  await client.schedulePosts({ tweets: ["root", "reply"], scheduledFor: IN_3H, mediaId: "m-9" });
+  const body = JSON.parse(calls[0].init.body);
+  assert.deepEqual(body.posts, [{ content: "root", media_id: "m-9" }, { content: "reply" }]);
+});
+
+// ---------------------------------------------------------------------------
+// uploadMedia — init → signed-URL PUT → complete, with the bytes going DIRECT
+// to storage (never through the bearer-authed API path).
+// ---------------------------------------------------------------------------
+
+function mockUploadFetch({ initBody, putStatus = 200, completeBody } = {}) {
+  const calls = [];
+  const impl = async (url, init = {}) => {
+    calls.push({ url, init });
+    if (url.endsWith("/api/v1/media")) {
+      return { ok: true, status: 201, json: async () => initBody ?? {
+        media_id: "m-1",
+        upload: { signed_url: "https://storage.example/upload/sign/compose-media/u1/m-1.mp4?token=tok123" },
+      } };
+    }
+    if (url.includes("storage.example")) {
+      return { ok: putStatus < 300, status: putStatus, json: async () => ({ error: "put failed" }) };
+    }
+    if (url.endsWith("/complete")) {
+      return { ok: true, status: 200, json: async () => completeBody ?? { media: { id: "m-1", status: "ready" } } };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  return { impl, calls };
+}
+
+test("uploadMedia: init carries mime+size, bytes PUT to the signed URL, complete marks ready", async () => {
+  const { impl, calls } = mockUploadFetch();
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  const readCalls = [];
+  const out = await client.uploadMedia({
+    filePath: "/videos/demo.mp4",
+    readFileImpl: (p) => { readCalls.push(p); return Buffer.alloc(2048); },
+  });
+  assert.deepEqual(readCalls, ["/videos/demo.mp4"]);
+  assert.equal(out.mediaId, "m-1");
+  assert.equal(out.media.status, "ready");
+
+  assert.equal(calls.length, 3);
+  // 1. init — bearer-authed API call with metadata only (no bytes)
+  assert.equal(calls[0].url, "https://vibedraft.app/api/v1/media");
+  assert.equal(calls[0].init.headers.Authorization, "Bearer vd_pat_test");
+  assert.deepEqual(JSON.parse(calls[0].init.body), { mime_type: "video/mp4", size_bytes: 2048 });
+  // 2. PUT — direct to storage, token in the URL, NO vibedraft bearer
+  assert.match(calls[1].url, /^https:\/\/storage\.example\/.*token=tok123/);
+  assert.equal(calls[1].init.method, "PUT");
+  assert.equal(calls[1].init.headers["Content-Type"], "video/mp4");
+  assert.equal(calls[1].init.headers.Authorization, undefined);
+  assert.equal(calls[1].init.body.length, 2048);
+  // 3. complete — back on the bearer-authed API
+  assert.equal(calls[2].url, "https://vibedraft.app/api/v1/media/m-1/complete");
+  assert.equal(calls[2].init.method, "POST");
+});
+
+test("uploadMedia: separate token is appended when the signed URL lacks one", async () => {
+  const { impl, calls } = mockUploadFetch({
+    initBody: { media_id: "m-2", upload: { signed_url: "https://storage.example/upload/sign/x", token: "sep-tok" } },
+    completeBody: { media: { id: "m-2", status: "ready" } },
+  });
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  await client.uploadMedia({ filePath: "/a.png", readFileImpl: () => Buffer.alloc(8) });
+  assert.match(calls[1].url, /\?token=sep-tok$/);
+});
+
+test("uploadMedia: unsupported type and unreadable file fail before any network call", async () => {
+  const { impl, calls } = mockUploadFetch();
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  await assert.rejects(() => client.uploadMedia({ filePath: "/a.gif" }), /unsupported media type/);
+  await assert.rejects(
+    () => client.uploadMedia({ filePath: "/a.png", readFileImpl: () => { throw new Error("EACCES"); } }),
+    /could not read media file/,
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("uploadMedia: storage PUT failure surfaces status + detail, complete never called", async () => {
+  const { impl, calls } = mockUploadFetch({ putStatus: 403 });
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  await assert.rejects(
+    () => client.uploadMedia({ filePath: "/a.mp4", readFileImpl: () => Buffer.alloc(8) }),
+    /media upload to storage failed: 403.*put failed/,
+  );
+  assert.equal(calls.length, 2); // init + PUT only
+});
+
+test("uploadMedia: malformed init response names the problem", async () => {
+  const { impl } = mockUploadFetch({ initBody: { nope: true } });
+  const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+  await assert.rejects(
+    () => client.uploadMedia({ filePath: "/a.mp4", readFileImpl: () => Buffer.alloc(8) }),
+    /no media_id\/signed_url/,
+  );
+});
+
+test("client: media API error codes map to actionable messages", async () => {
+  const cases = [
+    [{ status: 415, body: { error: "unsupported_media_type" } }, /jpg\/jpeg\/png\/webp images/],
+    [{ status: 413, body: { error: "media_too_large" } }, /size limit/],
+    [{ status: 409, body: { error: "media_not_ready" } }, /upload the file again/],
+    [{ status: 409, body: { error: "upload_incomplete" } }, /retry the upload/],
+  ];
+  for (const [resp, re] of cases) {
+    const { impl } = mockFetch(() => resp);
+    const client = makeScheduleClient({ ...CFG, fetchImpl: impl });
+    await assert.rejects(() => client.listScheduled(), re);
+  }
+});
+
 test("client: API error codes map to actionable messages", async () => {
   const cases = [
     [{ status: 401, body: { error: "invalid_token" } }, /revoked or expired/],
@@ -261,6 +430,18 @@ test("bulk validate: offset-less scheduled_for is rejected (bulk is stricter)", 
     ),
     [],
   );
+});
+
+test("bulk validate: media is rejected explicitly (text-only), never silently dropped", () => {
+  const errs = validateBulkSchedule(
+    [ITEM, { tweets: ["x"], scheduledFor: IN_3H, image: PNG }, { tweets: ["y"], scheduledFor: IN_3H, video: MP4 }],
+    NOW,
+  );
+  assert.ok(errs.some((e) => e.startsWith("post 2: ") && /text-only/.test(e)));
+  assert.ok(errs.some((e) => e.startsWith("post 3: ") && /text-only/.test(e)));
+  assert.ok(!errs.some((e) => e.startsWith("post 1: ")));
+  // the text-only rejection is the ONLY media error (no confusing type/size noise)
+  assert.equal(errs.length, 2);
 });
 
 test("bulk validate: reply constraints apply per item", () => {

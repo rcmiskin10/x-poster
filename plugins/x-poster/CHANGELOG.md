@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.9.0
+- **Scheduled posts can carry media.** `schedule_post` (MCP) and `--at` (CLI) accept one `image`
+  (jpg/png/webp ≤ 5 MB) or one `video` (.mp4 ≤ 512 MB). The file uploads to vibedraft at schedule
+  time via its v1 media API — `POST /api/v1/media` (metadata → media_id + signed URL), a direct
+  PUT of the bytes to storage (bypasses Vercel's ~4.5 MB body cap), `POST /api/v1/media/{id}/complete` —
+  then `media_id` rides on the first post of the thread and the dispatcher attaches it at post time.
+  Upload happens AFTER the confirmation gate, so a declined draft never spends an upload.
+- **Nonce binding covers scheduled media.** The `preview_post` nonce has always bound `image`/`video`;
+  `schedule_post` now verifies against the media-inclusive payload — a text-only nonce can't schedule
+  a post with media, and vice versa.
+- **Bulk stays text-only, loudly.** `validateBulkSchedule` rejects any item carrying `image`/`video`
+  ("bulk scheduling is text-only") instead of silently dropping the field — same drift class as the
+  1.6 `--video` incident.
+- Requires the vibedraft side of the contract (v1 media API + `media_id` on v1 scheduled-posts);
+  scheduling text-only posts works against older vibedraft deployments unchanged.
+
 ## 1.8.0
 - **Bulk scheduling: up to 20 posts in one confirmed action.** New MCP tool pair `preview_bulk` /
   `schedule_bulk` and CLI flag `--bulk <posts.json>`. Each item is an independent post or 2-6-tweet

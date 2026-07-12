@@ -1,5 +1,8 @@
-import { test } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { makeTools } from "../server.mjs";
 
 // schedule_post must go through the SAME human gate as publish_post: a nonce
@@ -8,10 +11,25 @@ import { makeTools } from "../server.mjs";
 
 const IN_3H = new Date(Date.now() + 3 * 60 * 60_000).toISOString();
 
+// Real temp files — schedule-time media validation stats them.
+const CLIP = join(tmpdir(), `sched-tools-${process.pid}.mp4`);
+const SHOT = join(tmpdir(), `sched-tools-${process.pid}.png`);
+before(() => {
+  writeFileSync(CLIP, Buffer.alloc(2048));
+  writeFileSync(SHOT, Buffer.alloc(1024));
+});
+after(() => {
+  for (const f of [CLIP, SHOT]) rmSync(f, { force: true });
+});
+
 function makeMockClient() {
-  const calls = { schedule: [], list: [], cancel: [] };
+  const calls = { schedule: [], list: [], cancel: [], upload: [] };
   return {
     calls,
+    uploadMedia: async (args) => {
+      calls.upload.push(args);
+      return { mediaId: "m-77", media: { id: "m-77", status: "ready" } };
+    },
     schedulePosts: async (args) => {
       calls.schedule.push(args);
       return args.tweets.map((t, i) => ({
@@ -79,17 +97,69 @@ test("schedule_post: nonce is payload-bound — different text does not verify",
   assert.equal(client.calls.schedule.length, 0);
 });
 
-test("schedule_post: a media-bound preview nonce does not verify (media unsupported)", async () => {
-  const { tools } = makeScheduleTools();
-  const preview = await tools.preview_post.handler({ text: "with pic", image: "/tmp/nope.png" });
+test("schedule_post: video flows — nonce binds it, upload happens after the gate, media_id reaches the API", async () => {
+  const { tools, client } = makeScheduleTools();
+  const preview = await tools.preview_post.handler({ text: "demo drop", video: CLIP });
+  assert.equal(preview.hasVideo, true);
+  const result = await tools.schedule_post.handler({
+    text: "demo drop",
+    scheduled_for: IN_3H,
+    video: CLIP,
+    confirm_nonce: preview.confirm_nonce,
+  });
+  assert.deepEqual(client.calls.upload, [{ filePath: CLIP }]);
+  assert.equal(client.calls.schedule[0].mediaId, "m-77");
+  assert.equal(result.media_id, "m-77");
+  assert.match(result.render, /🎬 video/);
+  assert.match(result.render, /📎 media uploaded to vibedraft \(id m-77\)/);
+});
+
+test("schedule_post: image flows the same way", async () => {
+  const { tools, client } = makeScheduleTools();
+  const preview = await tools.preview_post.handler({ text: "with pic", image: SHOT });
+  const result = await tools.schedule_post.handler({
+    text: "with pic",
+    scheduled_for: IN_3H,
+    image: SHOT,
+    confirm_nonce: preview.confirm_nonce,
+  });
+  assert.deepEqual(client.calls.upload, [{ filePath: SHOT }]);
+  assert.equal(client.calls.schedule[0].mediaId, "m-77");
+  assert.match(result.render, /🖼 image/);
+});
+
+test("schedule_post: the nonce is media-bound in BOTH directions", async () => {
+  const { tools, client } = makeScheduleTools();
+  // media-bound nonce must not authorize a text-only schedule
+  const withMedia = await tools.preview_post.handler({ text: "same words", video: CLIP });
   await assert.rejects(
-    () => tools.schedule_post.handler({
-      text: "with pic",
-      scheduled_for: IN_3H,
-      confirm_nonce: preview.confirm_nonce,
-    }),
+    () => tools.schedule_post.handler({ text: "same words", scheduled_for: IN_3H, confirm_nonce: withMedia.confirm_nonce }),
     /confirm_nonce/,
   );
+  // text-only nonce must not authorize a schedule WITH media
+  const textOnly = await tools.preview_post.handler({ text: "same words" });
+  await assert.rejects(
+    () => tools.schedule_post.handler({ text: "same words", scheduled_for: IN_3H, video: CLIP, confirm_nonce: textOnly.confirm_nonce }),
+    /confirm_nonce/,
+  );
+  assert.equal(client.calls.upload.length, 0);
+  assert.equal(client.calls.schedule.length, 0);
+});
+
+test("schedule_post: media validation failures never reach upload (missing file, oversized rejected upstream)", async () => {
+  const { tools, client } = makeScheduleTools();
+  const preview = await tools.preview_post.handler({ text: "ghost", video: "/tmp/nope.mp4" });
+  await assert.rejects(
+    () => tools.schedule_post.handler({
+      text: "ghost",
+      scheduled_for: IN_3H,
+      video: "/tmp/nope.mp4",
+      confirm_nonce: preview.confirm_nonce,
+    }),
+    /not found/,
+  );
+  assert.equal(client.calls.upload.length, 0);
+  assert.equal(client.calls.schedule.length, 0);
 });
 
 test("schedule_post: thread nonce round-trips; rows map per tweet", async () => {

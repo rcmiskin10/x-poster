@@ -196,8 +196,10 @@ Flags: `--text` · `--thread <t1> <t2> …` · `--image <path>` · `--video <pat
 If you use [vibedraft](https://vibedraft.app), x-poster can hand a post to its scheduler instead of
 posting immediately — the vibedraft cron fires it at the chosen time **even if your machine is
 asleep**, through *your* vibedraft-connected X account (cost billed there, not to this app's keys).
-Text and threads only — no media in v1. Setup: create a token in vibedraft under **Settings → API
-tokens** and add `VIBEDRAFT_API_URL` + `VIBEDRAFT_API_TOKEN` to the same env file.
+Media rides along: one image (jpg/png/webp ≤5MB) or one .mp4 (≤512MB) per post, uploaded to
+vibedraft at schedule time and attached to the first tweet when it fires. Setup: create a token in
+vibedraft under **Settings → API tokens** and add `VIBEDRAFT_API_URL` + `VIBEDRAFT_API_TOKEN` to
+the same env file.
 
 In chat, the flow mirrors posting: `preview_post` first, then — after you say "ship it at 9am" —
 `schedule_post` (same content-frozen confirmation gate). `list_scheduled` shows your queue (posted
@@ -206,6 +208,9 @@ rows include `posted_tweet_id`); `cancel_scheduled` cancels a pending row.
 ```bash
 # schedule instead of posting now (same --confirm gate; --dry-run schedules nothing)
 node --env-file=./x-poster.env x-post.mjs --confirm --at 2026-07-08T09:00:00Z --text "..."
+
+# scheduled WITH media — the file uploads to vibedraft now, posts at fire time
+node --env-file=./x-poster.env x-post.mjs --confirm --at 2026-07-08T09:00:00Z --video ./demo.mp4 --text "..."
 
 # list scheduled rows (add --status pending/posted/… or --since <ISO>)
 node --env-file=./x-poster.env x-post.mjs --list-scheduled --status pending
