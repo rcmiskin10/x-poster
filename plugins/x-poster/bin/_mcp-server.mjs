@@ -5,11 +5,13 @@
 //   startServer()      — wires real deps + SDK stdio transport; run guard at bottom
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { buildPlan, costEstimate, containsUrl, postCost, resolveMaxChars, STANDARD_TWEET_CHARS, LONGFORM_TWEET_CHARS } from "./_poster.mjs";
 import { makeTokenStore } from "./_token-store.mjs";
 import { startAuthSession } from "./_auth.mjs";
 import { resolveVibedraftConfig, validateSchedule, validateBulkSchedule, makeScheduleClient, BULK_ITEMS_MAX } from "./_scheduler.mjs";
+import { resolveTrackConfig, emitPublished } from "./_track.mjs";
+import { buildArticlePlan, createArticleDraft, publishArticleDraft, loadArticleMarkdown, coverMediaFor, ARTICLE_COST_NOTE } from "./_article.mjs";
 
 // ---------------------------------------------------------------------------
 // loadEnvFile — minimal KEY=VALUE parser (mirrors the CLI's X_ENV_FILE support
@@ -101,12 +103,25 @@ function makeNonceFns(secret) {
     return hashMatch && sigMatch;
   }
 
+  // Article canonical wraps under its own top-level key, like bulk does, so a
+  // post nonce can never verify an article publish or vice versa. Bound to the
+  // rendered content_state rather than the raw markdown: the nonce must freeze
+  // what X will actually receive, not the source it was derived from.
+  function canonicalArticle(title, contentState, coverPath) {
+    // cover_path is bound too. Without it an approved preview could be
+    // redeemed with a different banner attached — the same swap the
+    // content_state binding already prevents for the body.
+    return JSON.stringify({ article: { title, content_state: contentState, cover_path: coverPath || null } });
+  }
+
   const mintNonce = (tweets, image, inReplyTo, video) => mintFor(canonical(tweets, image, inReplyTo, video));
   const verifyNonce = (nonce, tweets, image, inReplyTo, video) => verifyFor(nonce, canonical(tweets, image, inReplyTo, video));
   const mintBulkNonce = (items) => mintFor(canonicalBulk(items));
   const verifyBulkNonce = (nonce, items) => verifyFor(nonce, canonicalBulk(items));
+  const mintArticleNonce = (title, contentState, coverPath) => mintFor(canonicalArticle(title, contentState, coverPath));
+  const verifyArticleNonce = (nonce, title, contentState, coverPath) => verifyFor(nonce, canonicalArticle(title, contentState, coverPath));
 
-  return { mintNonce, verifyNonce, mintBulkNonce, verifyBulkNonce };
+  return { mintNonce, verifyNonce, mintBulkNonce, verifyBulkNonce, mintArticleNonce, verifyArticleNonce };
 }
 
 // ---------------------------------------------------------------------------
@@ -275,14 +290,79 @@ export function renderBulkDashboard({ stage, items, totalEstimatedCostUsd, error
 
 // ---------------------------------------------------------------------------
 // makeTools — pure factory; no SDK, no network required
-// deps = { postThread, statePath, elicit?, maxChars?, getScheduleClient? }
+// deps = { postThread, statePath, elicit?, maxChars?, getScheduleClient?, emitTrack? }
 //   postThread(tweets, image?, inReplyTo?, video?) → ids[]   (injected; may be mock)
 //   elicit is either null or async ({rendered, costUsd}) => boolean
 //   maxChars is the per-tweet character limit (default 25000; X's hard ceiling)
 //   getScheduleClient() → vibedraft schedule client (throws an actionable error
 //     when VIBEDRAFT_API_URL/TOKEN are unset — resolution is LAZY so the server
 //     works fine for users who never schedule)
+//   emitTrack(ids, tweets, inReplyTo) → observation-pipeline post.published
+//     relay (track.mjs). Optional and PASSIVE: null/absent config disables it;
+//     it never throws and never changes the publish result.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// renderArticleDashboard — the long-form sibling. Deliberately NOT renderDashboard:
+// an article has no per-tweet rows, and its cost is null (X publishes no
+// per-article price), which would throw on renderDashboard's .toFixed().
+// The extra `draft` stage is the whole point of the two-step flow — a draft is
+// private and recoverable, publishing is neither.
+// stage: "preview" | "draft" | "published"
+// ---------------------------------------------------------------------------
+
+const ARTICLE_PREVIEW_BLOCKS = 6;
+
+export function renderArticleDashboard({ stage, title, blocks, blockCounts, words, links, characters, errors = [], warnings = [], sample = [], articleId = null, url = null }) {
+  const rule = "─".repeat(44);
+  const ok = errors.length === 0;
+  const header = `📰 x-poster ▸ article`;
+
+  const steps =
+    stage === "published" ? "✅ convert   ✅ validate   ✅ gate   ✅ draft   ✅ publish"
+    : stage === "draft"   ? "✅ convert   ✅ validate   ✅ gate   ✅ draft   🟡 publish"
+    : ok                  ? "✅ convert   ✅ validate   🟡 gate   ⚪ draft   ⚪ publish"
+    :                       "✅ convert   ❌ validate   ⚪ gate   ⚪ draft   ⚪ publish";
+
+  const shape = Object.entries(blockCounts ?? {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([t, n]) => `${t}×${n}`)
+    .join(" · ");
+
+  const body = sample.length
+    ? sample.map((b) => `│ ${b.type === "unstyled" ? " " : "#"} ${b.text.slice(0, 60)}${b.text.length > 60 ? "…" : ""}`).join("\n")
+    : "│ (empty)";
+
+  const lines = [
+    header,
+    rule,
+    `📌 ${title || "(untitled)"}`,
+    rule,
+    body,
+    blocks > sample.length ? `│ … ${blocks - sample.length} more blocks` : null,
+    rule,
+    steps,
+    `📝 ${words} words · ${blocks} blocks · ${characters} chars · 🔗 ${links} link${links === 1 ? "" : "s"}`,
+    shape ? `🧱 ${shape}` : null,
+    `💸 cost unknown — ${ARTICLE_COST_NOTE}`,
+  ].filter(Boolean);
+
+  for (const w of warnings) lines.push(`⚠️ ${w}`);
+
+  if (stage === "published") {
+    lines.push(`🚀 live: ${url ?? `article ${articleId}`}`);
+  } else if (stage === "draft") {
+    lines.push(`📄 private draft created (id ${articleId}) — nothing is public yet`);
+    lines.push(`🚦 read it in X's editor, then publish_article with publish: true to go live`);
+  } else if (ok) {
+    lines.push(`🚦 awaiting explicit confirmation — reply "ship it" to create the draft`);
+    lines.push(`ℹ️ requires X Premium on the authenticated account`);
+  } else {
+    for (const e of errors) lines.push(`⛔ ${e}`);
+    lines.push("⛔ fix validation errors, then preview again");
+  }
+  return lines.join("\n");
+}
 
 export function makeTools(deps) {
   const {
@@ -293,11 +373,15 @@ export function makeTools(deps) {
     getScheduleClient = () => {
       throw new Error("scheduling is not configured for this server instance");
     },
+    emitTrack = null,
+    postArticle: injectedPostArticle = () => {
+      throw new Error("article publishing is not configured for this server instance");
+    },
   } = deps;
 
   // Per-factory random secret for nonces
   const nonceSecret = randomBytes(32);
-  const { mintNonce, verifyNonce, mintBulkNonce, verifyBulkNonce } = makeNonceFns(nonceSecret);
+  const { mintNonce, verifyNonce, mintBulkNonce, verifyBulkNonce, mintArticleNonce, verifyArticleNonce } = makeNonceFns(nonceSecret);
 
   // -------------------------------------------------------------------------
   // preview_post — PURE, zero network
@@ -357,6 +441,10 @@ export function makeTools(deps) {
     // Post via injected postThread
     const ids = await injectedPostThread(tweets, image || null, in_reply_to || null, video || null);
     const urls = ids.map(id => `https://x.com/i/web/status/${id}`);
+    // Observation pipeline: bounded, never-throwing, result-invisible.
+    if (typeof emitTrack === "function") {
+      try { await emitTrack(ids, tweets, in_reply_to || null); } catch {}
+    }
     return {
       posted: ids,
       urls,
@@ -565,9 +653,114 @@ export function makeTools(deps) {
     };
   }
 
+  // -------------------------------------------------------------------------
+  // preview_article — PURE, zero network. Converts markdown to content_state
+  // and mints the nonce that publish_article requires.
+  // -------------------------------------------------------------------------
+  function planArticle({ title, markdown, markdown_path }) {
+    const md = markdown ?? (markdown_path ? loadArticleMarkdown(markdown_path) : "");
+    return buildArticlePlan({ title, markdown: md, dryRun: true, hasCreds: true });
+  }
+
+  function articleResult(plan, extra) {
+    return {
+      title: plan.title,
+      blocks: plan.blocks,
+      blockCounts: plan.blockCounts,
+      words: plan.words,
+      characters: plan.characters,
+      links: plan.links,
+      estimatedCostUsd: plan.estimatedCostUsd,
+      costNote: plan.costNote,
+      warnings: plan.warnings,
+      errors: plan.errors,
+      ...extra,
+    };
+  }
+
+  async function previewArticleHandler({ title, markdown, markdown_path, cover_path }) {
+    const plan = planArticle({ title, markdown, markdown_path });
+    // Fail here rather than at publish. preview is pure so the file is only
+    // stat-ed, but a path that does not exist is worth saying before the user
+    // approves an article they think will have a banner.
+    if (cover_path && !existsSync(cover_path)) {
+      plan.errors.push(`cover_path does not exist: ${cover_path}`);
+    }
+    // No nonce for an invalid article — a nonce is an approval token, and there
+    // is nothing here worth approving.
+    const confirm_nonce = plan.errors.length ? null : mintArticleNonce(plan.title, plan.contentState, cover_path);
+    const sample = plan.contentState.blocks.slice(0, ARTICLE_PREVIEW_BLOCKS);
+    return articleResult(plan, {
+      confirm_nonce,
+      render: renderArticleDashboard({
+        stage: "preview",
+        title: plan.title,
+        blocks: plan.blocks,
+        blockCounts: plan.blockCounts,
+        words: plan.words,
+        links: plan.links,
+        characters: plan.characters,
+        errors: plan.errors,
+        warnings: plan.warnings,
+        sample,
+      }),
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // publish_article — creates a PRIVATE draft, and only makes it public when
+  // publish is explicitly true. Same human gate as publish_post.
+  // -------------------------------------------------------------------------
+  async function publishArticleHandler({ title, markdown, markdown_path, publish = false, confirm_nonce, cover_path }) {
+    // Re-derive content_state from the markdown server-side. The model never
+    // supplies content_state, and the nonce is verified against what WE built,
+    // so an approved preview cannot be swapped for different rendered content.
+    const plan = planArticle({ title, markdown, markdown_path });
+    if (plan.errors.length) throw new Error(plan.errors.join("; "));
+
+    if (typeof elicit === "function") {
+      const rendered = `${plan.title}\n\n${plan.contentState.blocks.slice(0, ARTICLE_PREVIEW_BLOCKS).map((b) => b.text).join("\n")}\n\n(${plan.words} words, ${plan.blocks} blocks)` +
+        (publish ? "\n\nThis will be PUBLIC immediately." : "\n\nThis creates a PRIVATE draft only.");
+      const approved = await elicit({ rendered, costUsd: 0 });
+      if (!approved) throw new Error("user declined");
+    } else {
+      if (!verifyArticleNonce(confirm_nonce, plan.title, plan.contentState, cover_path)) {
+        throw new Error("missing/invalid confirm_nonce — call preview_article first to get a nonce");
+      }
+    }
+
+    const { id, url } = await injectedPostArticle({
+      title: plan.title,
+      contentState: plan.contentState,
+      publish: publish === true,
+      coverPath: cover_path || null,
+    });
+
+    return articleResult(plan, {
+      articleId: id,
+      url: url ?? null,
+      published: publish === true,
+      render: renderArticleDashboard({
+        stage: publish === true ? "published" : "draft",
+        title: plan.title,
+        blocks: plan.blocks,
+        blockCounts: plan.blockCounts,
+        words: plan.words,
+        links: plan.links,
+        characters: plan.characters,
+        warnings: plan.warnings,
+        sample: plan.contentState.blocks.slice(0, ARTICLE_PREVIEW_BLOCKS),
+        articleId: id,
+        url,
+      }),
+    });
+  }
+
   return {
     preview_post: { handler: previewHandler },
     publish_post: { handler: publishHandler },
+    preview_article: { handler: previewArticleHandler },
+    publish_article: { handler: publishArticleHandler },
     schedule_post: { handler: scheduleHandler },
     preview_bulk: { handler: previewBulkHandler },
     schedule_bulk: { handler: scheduleBulkHandler },
@@ -615,6 +808,58 @@ export function makePostAdapter({ tokenStore, corePostThread, clientId, clientSe
       )
     );
     // Keep the chain alive whether this call succeeds or errors.
+    _postChain = run.then(() => {}, () => {});
+    return run;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// makeArticleAdapter — the article sibling of makePostAdapter.
+//
+// Shares the SAME _postChain. This is not tidiness: X refresh tokens are
+// single-use and rotate on every refresh, so an article and a post refreshing
+// concurrently would burn the token twice, and X's reuse-detection revokes the
+// WHOLE grant when it sees the dead token replayed. Serializing every path that
+// refreshes is the only thing keeping that from being reachable.
+//
+// Testable with no SDK and no network: inject fakes for the three collaborators.
+// ---------------------------------------------------------------------------
+
+export function makeArticleAdapter({ tokenStore, refresh, createDraft, publishDraft, uploadMedia, clientId, clientSecret }) {
+  return ({ title, contentState, publish, coverPath }) => {
+    try {
+      tokenStore.current();
+    } catch {
+      return Promise.reject(new Error(
+        "Not connected to your X account yet — run the authorize tool first. " +
+        "It returns a link; open it, click Authorize, done. No terminal needed.",
+      ));
+    }
+    const run = _postChain.then(async () => {
+      const accessToken = await refresh(
+        { clientId, clientSecret, refreshToken: tokenStore.current() },
+        (newToken) => tokenStore.persist(newToken),
+      );
+      // Upload the cover inside this chain, not before it: it needs the token
+      // this refresh just minted, and _postChain is what keeps two paths from
+      // refreshing the single-use token at once.
+      //
+      // A failed upload aborts before the draft exists. The alternative —
+      // create the article anyway and mention the cover failed — is how the
+      // distribution article shipped bare, so a cover that was asked for and
+      // could not be attached is an error, not a warning.
+      let coverMedia = null;
+      if (coverPath) {
+        if (typeof uploadMedia !== "function") {
+          throw new Error("a cover was requested but no uploadMedia was injected");
+        }
+        coverMedia = coverMediaFor(await uploadMedia(accessToken, coverPath));
+      }
+      const draft = await createDraft({ title, contentState, coverMedia }, accessToken);
+      if (!publish) return { id: draft.id, url: null, published: false };
+      await publishDraft(draft.id, accessToken);
+      return { id: draft.id, url: `https://x.com/i/article/${draft.id}`, published: true };
+    });
     _postChain = run.then(() => {}, () => {});
     return run;
   };
@@ -681,9 +926,35 @@ export async function startServer() {
     return scheduleClient;
   };
 
+  // Observation-pipeline relay — config resolved once at boot; null (unset
+  // VIBEDRAFT_* vars) disables tracking entirely. Threads track the first
+  // tweet id only; postedAt is the moment the publish succeeded.
+  const trackConfig = resolveTrackConfig(process.env, fileCreds);
+  const emitTrack = (ids, tweets, inReplyTo) =>
+    emitPublished({
+      config: trackConfig,
+      tweetId: ids[0],
+      postedAt: new Date().toISOString(),
+      threadLen: tweets.length,
+      inReplyTo,
+    });
+
+  // Article adapter — shares _postChain with the post adapter so no two paths
+  // can refresh the single-use token concurrently.
+  const { refreshAccessToken, uploadMedia } = await import("./_poster.mjs");
+  const injectedPostArticle = makeArticleAdapter({
+    tokenStore,
+    refresh: refreshAccessToken,
+    createDraft: createArticleDraft,
+    publishDraft: publishArticleDraft,
+    uploadMedia,
+    clientId,
+    clientSecret,
+  });
+
   // makeTools(elicit) — factory bound to the stable deps, parameterized on elicit.
   const buildTools = (elicit) =>
-    makeTools({ postThread: injectedPostThread, statePath, elicit, maxChars, getScheduleClient });
+    makeTools({ postThread: injectedPostThread, statePath, elicit, maxChars, getScheduleClient, emitTrack, postArticle: injectedPostArticle });
 
   // preview_post / auth_instructions never elicit, so a nonce-mode instance is fine.
   // IMPORTANT: nonces are bound to a per-factory random secret, so preview_post and
@@ -757,6 +1028,76 @@ export async function startServer() {
       }
 
       const result = await tools.publish_post.handler(args);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  // Shared zod shape — the article source. Exactly one of markdown / markdown_path.
+  const articleSourceShape = {
+    title: z.string().optional().describe("Article title. Optional ONLY if the markdown has a `title:` frontmatter key."),
+    markdown: z.string().optional().describe("The article body as markdown (mutually exclusive with markdown_path). Headings, bold, italic, links, lists, and blockquotes convert; fenced code becomes plain paragraphs because X's format has no code block."),
+    markdown_path: z.string().optional().describe("Absolute path to a .md file to publish instead of inline markdown. Frontmatter is stripped and can supply the title."),
+    cover_path: z.string().optional().describe("Absolute path to a cover image (the article's banner). X renders it at 5:2 — 1920x768 is the safe size. Uploaded and attached at publish time; if the upload fails the article is NOT created."),
+  };
+
+  server.registerTool(
+    "preview_article",
+    {
+      description:
+        "Preview a long-form X Article before publishing. Converts markdown to X's content_state and reports the title, word/block counts, links, and any warnings. " +
+        "PURE — no network I/O, nothing is created. Returns a confirm_nonce required by publish_article, and a `render` dashboard block — show `render` to the user VERBATIM. " +
+        "Articles are long-form posts on X and are NOT the same as a tweet or thread: use preview_post/publish_post for those. Requires X Premium on the authenticated account.",
+      inputSchema: articleSourceShape,
+    },
+    async (args) => {
+      const result = await nonceTools.preview_article.handler(args);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "publish_article",
+    {
+      description:
+        "Create an X Article from markdown. By default this creates a PRIVATE DRAFT only — pass publish: true to make it public immediately. " +
+        "The two-step flow is deliberate: a draft can be read in X's editor and discarded, a published article under the user's byline cannot be taken back. Prefer drafting first unless the user explicitly says publish now. " +
+        "Requires a valid confirm_nonce from preview_article for the SAME title + markdown (the content is re-converted server-side and the nonce checked against it). " +
+        "Requires X Premium. Returns a `render` dashboard block — show it to the user VERBATIM.",
+      inputSchema: {
+        ...articleSourceShape,
+        publish: z.boolean().optional().describe("false/omitted = create a private draft only (default, and the safe choice). true = publish publicly and irreversibly."),
+        confirm_nonce: z.string().optional().describe("Nonce issued by preview_article for the SAME title + markdown. Required when the client does not support elicitation."),
+      },
+    },
+    async (args, ctx) => {
+      const supportsElicitation = !!ctx?.clientCapabilities?.elicitation;
+      let tools;
+      if (supportsElicitation) {
+        const elicit = async ({ rendered }) => {
+          const result = await ctx.mcpReq.elicitInput({
+            mode: "form",
+            message: `Confirm X ARTICLE:\n\n${rendered}`,
+            requestedSchema: {
+              type: "object",
+              properties: {
+                confirm: {
+                  type: "boolean",
+                  title: args.publish === true ? "Confirm PUBLIC publish" : "Confirm draft",
+                  description: args.publish === true
+                    ? "Set to true to publish this article publicly. This cannot be undone."
+                    : "Set to true to create a private draft",
+                },
+              },
+              required: ["confirm"],
+            },
+          });
+          return result.action === "accept" && result.content?.confirm === true;
+        };
+        tools = buildTools(elicit);
+      } else {
+        tools = nonceTools;
+      }
+      const result = await tools.publish_article.handler(args);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   );

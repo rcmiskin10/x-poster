@@ -3,7 +3,7 @@
 // current() supplies the refresh token, and rotation persists via onRotatedToken.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makePostAdapter } from "../server.mjs";
+import { makePostAdapter, makeArticleAdapter } from "../server.mjs";
 
 // Minimal fake token store mirroring core/token-store.mjs's surface.
 function fakeStore(initial) {
@@ -97,4 +97,85 @@ test("adapter serializes concurrent calls (no interleaving)", async () => {
   // Serialization means A must complete entirely before B starts.
   assert.deepEqual(order, ["start:A", "end:A", "start:B", "end:B"], "calls must not interleave");
   assert.equal(maxConcurrent, 1, "at most one corePostThread active at a time");
+});
+
+// ---------------------------------------------------------------------------
+// makeArticleAdapter — cover attachment.
+//
+// The distribution article published with no banner because attaching one was
+// a step a human had to remember. These pin the two rules that replace the
+// remembering: a requested cover is uploaded and attached, and a cover that
+// cannot be uploaded stops the article rather than shipping it bare.
+// ---------------------------------------------------------------------------
+
+function articleDeps(overrides = {}) {
+  const calls = { uploads: [], drafts: [], publishes: [] };
+  const deps = {
+    tokenStore: { current: () => "refresh-tok", persist: () => {} },
+    refresh: async () => "access-tok",
+    uploadMedia: async (token, path) => {
+      calls.uploads.push({ token, path });
+      return "999";
+    },
+    createDraft: async (payload) => {
+      calls.drafts.push(payload);
+      return { id: "art-1" };
+    },
+    publishDraft: async (id) => {
+      calls.publishes.push(id);
+      return {};
+    },
+    clientId: "cid",
+    clientSecret: "csec",
+    ...overrides,
+  };
+  return { deps, calls };
+}
+
+test("article adapter uploads the cover and attaches it to the draft", async () => {
+  const { deps, calls } = articleDeps();
+  const post = makeArticleAdapter(deps);
+  await post({ title: "t", contentState: { blocks: [], entities: [] }, coverPath: "/tmp/cover.png" });
+
+  assert.equal(calls.uploads.length, 1);
+  assert.equal(calls.uploads[0].path, "/tmp/cover.png");
+  // The upload must use the token the refresh just minted, not the refresh token.
+  assert.equal(calls.uploads[0].token, "access-tok");
+  assert.deepEqual(calls.drafts[0].coverMedia, { media_category: "tweet_image", media_id: "999" });
+});
+
+test("article adapter passes no coverMedia when none was asked for", async () => {
+  const { deps, calls } = articleDeps();
+  const post = makeArticleAdapter(deps);
+  await post({ title: "t", contentState: { blocks: [], entities: [] } });
+  assert.equal(calls.uploads.length, 0);
+  assert.equal(calls.drafts[0].coverMedia, null);
+});
+
+test("a failed cover upload does NOT create the article", async () => {
+  // The tempting alternative is to create it anyway and warn. That is exactly
+  // how an article ends up on X missing the image it was meant to have, and
+  // drafts cannot be deleted through the API.
+  const { deps, calls } = articleDeps({
+    uploadMedia: async () => {
+      throw new Error("media upload failed: 413 too large");
+    },
+  });
+  const post = makeArticleAdapter(deps);
+  await assert.rejects(
+    () => post({ title: "t", contentState: { blocks: [], entities: [] }, coverPath: "/tmp/big.png" }),
+    /media upload failed/,
+  );
+  assert.equal(calls.drafts.length, 0, "no draft may exist after a failed cover upload");
+  assert.equal(calls.publishes.length, 0);
+});
+
+test("asking for a cover with no uploadMedia injected fails loudly", async () => {
+  const { deps, calls } = articleDeps({ uploadMedia: undefined });
+  const post = makeArticleAdapter(deps);
+  await assert.rejects(
+    () => post({ title: "t", contentState: { blocks: [], entities: [] }, coverPath: "/tmp/c.png" }),
+    /no uploadMedia was injected/,
+  );
+  assert.equal(calls.drafts.length, 0);
 });

@@ -73,7 +73,7 @@ test("server completes an MCP stdio handshake and lists every tool", async () =>
     const byName = Object.fromEntries(list.result.tools.map((t) => [t.name, t]));
     assert.deepEqual(
       Object.keys(byName).sort(),
-      ["auth_instructions", "authorize", "cancel_scheduled", "list_scheduled", "preview_bulk", "preview_post", "publish_post", "schedule_bulk", "schedule_post"],
+      ["auth_instructions", "authorize", "cancel_scheduled", "list_scheduled", "preview_article", "preview_bulk", "preview_post", "publish_article", "publish_post", "schedule_bulk", "schedule_post"],
     );
     // Schemas must survive the zod → JSON Schema round-trip with params intact.
     for (const tool of ["preview_post", "publish_post"]) {
@@ -81,6 +81,12 @@ test("server completes an MCP stdio handshake and lists every tool", async () =>
       assert.ok(byName[tool].inputSchema?.properties?.thread, `${tool} exposes 'thread'`);
     }
     assert.ok(byName.publish_post.inputSchema.properties.confirm_nonce, "publish_post exposes 'confirm_nonce'");
+    // The cover is only useful if clients can actually see the parameter. A
+    // zod shape that fails the JSON Schema round-trip is invisible to the model
+    // and the feature silently does not exist.
+    for (const tool of ["preview_article", "publish_article"]) {
+      assert.ok(byName[tool].inputSchema?.properties?.cover_path, `${tool} exposes 'cover_path'`);
+    }
     assert.ok(byName.schedule_post.inputSchema?.properties?.scheduled_for, "schedule_post exposes 'scheduled_for'");
     assert.ok(byName.schedule_post.inputSchema?.properties?.confirm_nonce, "schedule_post exposes 'confirm_nonce'");
     assert.ok(byName.cancel_scheduled.inputSchema?.properties?.id, "cancel_scheduled exposes 'id'");

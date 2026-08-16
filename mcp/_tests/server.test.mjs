@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { makeTools, resolveAuthPort, resolveMaxChars } from "../server.mjs";
 
 const noNet = () => { throw new Error("network called during preview!"); };
@@ -96,4 +99,125 @@ test("a nonce minted with video does not authorize a post without video", async 
     () => tools.publish_post.handler({ text: "A", confirm_nonce }),
     /confirm|nonce/i,
   );
+});
+
+// ---------------------------------------------------------------------------
+// emitTrack (observation pipeline) — called after publish, never affects it
+// ---------------------------------------------------------------------------
+
+test("publish_post calls emitTrack with ids/tweets/inReplyTo after posting", async () => {
+  let seen = null;
+  const tools = makeTools({
+    postThread: async () => ["901", "902"],
+    statePath: "/tmp/x",
+    elicit: null,
+    emitTrack: async (ids, tweets, inReplyTo) => { seen = { ids, tweets, inReplyTo }; },
+  });
+  const { confirm_nonce } = await tools.preview_post.handler({ thread: ["one", "two"] });
+  const r = await tools.publish_post.handler({ thread: ["one", "two"], confirm_nonce });
+  assert.deepEqual(r.posted, ["901", "902"]);
+  assert.deepEqual(seen, { ids: ["901", "902"], tweets: ["one", "two"], inReplyTo: null });
+});
+
+test("publish_post succeeds even when emitTrack throws (tracking is passive)", async () => {
+  const tools = makeTools({
+    postThread: async () => ["1"],
+    statePath: "/tmp/x",
+    elicit: null,
+    emitTrack: async () => { throw new Error("events endpoint down"); },
+  });
+  const { confirm_nonce } = await tools.preview_post.handler({ text: "shipit" });
+  const r = await tools.publish_post.handler({ text: "shipit", confirm_nonce });
+  assert.deepEqual(r.posted, ["1"]);
+});
+
+test("publish_post works with no emitTrack dep (tracking not wired)", async () => {
+  const tools = makeTools({ postThread: async () => ["1"], statePath: "/tmp/x", elicit: null });
+  const { confirm_nonce } = await tools.preview_post.handler({ text: "shipit" });
+  const r = await tools.publish_post.handler({ text: "shipit", confirm_nonce });
+  assert.deepEqual(r.posted, ["1"]);
+});
+
+// ---------------------------------------------------------------------------
+// Article cover — nonce binding.
+//
+// The nonce already freezes the rendered content_state so an approved body
+// cannot be swapped. The cover is part of what the user approved, so it is
+// bound too: otherwise a preview approved with one banner could be redeemed
+// with a different one attached.
+// ---------------------------------------------------------------------------
+
+const COVER_MD = "# heading\n\nsome body text with a number 42 in it.\n";
+
+// Real files on disk: preview_article checks that a cover_path exists before it
+// mints an approval token, so fake paths would exercise that guard instead of
+// the nonce binding these tests are about.
+const COVER_DIR = mkdtempSync(join(tmpdir(), "xcover-test-"));
+const COVER_A = join(COVER_DIR, "a.png");
+const COVER_B = join(COVER_DIR, "b.png");
+writeFileSync(COVER_A, "not-a-real-png");
+writeFileSync(COVER_B, "also-not-a-real-png");
+
+function articleTools(posted) {
+  return makeTools({
+    postThread: async () => ["1"],
+    statePath: "/tmp/x",
+    elicit: null,
+    postArticle: async (a) => {
+      posted.push(a);
+      return { id: "art-1", url: null };
+    },
+  });
+}
+
+test("a nonce minted WITH a cover does not verify without one", async () => {
+  const posted = [];
+  const tools = articleTools(posted);
+  const pre = await tools.preview_article.handler({
+    title: "t", markdown: COVER_MD, cover_path: COVER_A,
+  });
+  assert.ok(pre.confirm_nonce, "preview minted a nonce");
+  await assert.rejects(
+    () => tools.publish_article.handler({ title: "t", markdown: COVER_MD, confirm_nonce: pre.confirm_nonce }),
+    /confirm_nonce/,
+  );
+  assert.equal(posted.length, 0, "nothing was created");
+});
+
+test("a nonce minted with one cover does not verify for a different cover", async () => {
+  const posted = [];
+  const tools = articleTools(posted);
+  const pre = await tools.preview_article.handler({
+    title: "t", markdown: COVER_MD, cover_path: COVER_A,
+  });
+  await assert.rejects(
+    () => tools.publish_article.handler({
+      title: "t", markdown: COVER_MD, cover_path: COVER_B, confirm_nonce: pre.confirm_nonce,
+    }),
+    /confirm_nonce/,
+  );
+  assert.equal(posted.length, 0);
+});
+
+test("the matching cover verifies and is handed to the adapter", async () => {
+  const posted = [];
+  const tools = articleTools(posted);
+  const pre = await tools.preview_article.handler({
+    title: "t", markdown: COVER_MD, cover_path: COVER_A,
+  });
+  await tools.publish_article.handler({
+    title: "t", markdown: COVER_MD, cover_path: COVER_A, confirm_nonce: pre.confirm_nonce,
+  });
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].coverPath, COVER_A);
+});
+
+test("preview_article reports a cover_path that does not exist, and mints no nonce", async () => {
+  const posted = [];
+  const tools = articleTools(posted);
+  const pre = await tools.preview_article.handler({
+    title: "t", markdown: COVER_MD, cover_path: "/tmp/definitely-not-here-9e3f.png",
+  });
+  assert.match(pre.errors.join(" "), /cover_path does not exist/);
+  assert.equal(pre.confirm_nonce, null, "an invalid article gets no approval token");
 });

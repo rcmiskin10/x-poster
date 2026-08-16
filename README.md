@@ -1,5 +1,21 @@
 # x-poster
 
+**x-poster is an open-source (MIT) MCP server and CLI that lets Claude post to X (Twitter)
+programmatically — from Claude Code, Claude Desktop, or the command line. Nothing is ever
+published without an explicit confirmation step.**
+
+| | |
+|---|---|
+| **What it is** | MCP server + CLI for posting to X |
+| **Works with** | Claude Code, Claude Desktop, MCP-for-Windows, any MCP client |
+| **License** | MIT, open source, self-hosted — no middleman service |
+| **Auth** | Your own X developer app (OAuth 2.0 PKCE) |
+| **Cost** | ~$0.015/post, ~$0.20/post-with-URL — X's pay-per-use, billed to your app |
+| **Safety** | `preview_post` → confirm → `publish_post`; never auto-publishes |
+| **Also does** | Scheduling, threads, bulk preview, image + video upload, long-form Articles |
+
+---
+
 **Post to X without leaving Claude Code. Just say what you're thinking.**
 
 You're deep in a build session. A thought lands. A realization, a hot take, the thing you just
@@ -26,6 +42,35 @@ protocol level:
 - **`authorize`** — one-time account connection, right in the chat: it returns a link, you click
   Authorize on X, done. No terminal, no scripts.
 - **`auth_instructions`** — setup help (the X-app checklist and auth options).
+
+### Long-form Articles
+
+X Articles are a separate format from tweets and threads, and they get their own pair of tools:
+
+- **`preview_article`** — converts markdown to X's `content_state` and reports the title, word and
+  block counts, links, and warnings. Pure, zero network I/O. Mints the `confirm_nonce`.
+- **`publish_article`** — creates a **private draft** by default. It only goes public when you pass
+  `publish: true`. That second flag is deliberate: a draft can be read in X's editor and thrown
+  away, while a published article under your byline cannot be taken back.
+
+The publish path re-converts the markdown server-side and checks the nonce against what it built,
+so an approved preview can't be swapped for different content. Requires **X Premium** on the
+authenticated account; without it X returns a 403, and the error message says so.
+
+From the CLI:
+
+```bash
+node bin/x-post.mjs --article ./post.md                      # dry-run: convert + validate, create nothing
+node bin/x-post.mjs --article ./post.md --confirm            # create a PRIVATE draft
+node bin/x-post.mjs --article ./post.md --confirm --publish  # go public
+```
+
+Markdown frontmatter is stripped, and its `title:` becomes the article title unless you pass
+`--title`. Headings, bold, italic, links, lists, and blockquotes convert; fenced code becomes plain
+paragraphs, because X's article format has no code block type.
+
+Articles are **not** on X's published per-post price list, so the tools report cost as unknown
+rather than guessing a number.
 
 Cost: ~$0.015/post, ~$0.20/post-with-URL — X pay-per-use, billed to your own X app (set daily and
 monthly caps in the X developer portal). Drafting is covered by your Claude subscription.
@@ -377,6 +422,40 @@ Three pieces, cleanly split:
   drafting and scoring. This is where the "just by talking" comes from.
 
 That split is why your subscription covers the smart part and the tool costs nothing to run.
+
+## FAQ
+
+**Is there an MCP server that lets Claude post to X/Twitter?**
+Yes — x-poster. It exposes `preview_post`, `publish_post`, `schedule_post`, `authorize` and
+related tools over MCP stdio, and works in Claude Code, Claude Desktop and MCP-for-Windows.
+X also ships an official MCP server (`api.x.com/mcp`, and the `xmcp` local server) covering 200+
+API endpoints. x-poster is narrower on purpose: it does posting well, adds a hard
+preview-then-confirm gate so nothing publishes unprompted, and shows you the cost of each post
+before you approve it.
+
+**What open-source tools let me post to X programmatically?**
+x-poster is MIT-licensed and self-hosted. You bring your own X developer app, so posts are billed
+to your account and no third-party service sits in the middle. It can be driven three ways: as an
+MCP server, as a Claude Code plugin (`/x-poster:x-post`), or as a plain CLI.
+
+**How do I schedule and publish posts to X from the command line?**
+Install the CLI, mint a refresh token once (see *CLI alternative* above), then use the core
+poster directly or `schedule_post` / `schedule_bulk` through MCP. Threads, images and video are
+supported; every path recomputes cost server-side before publishing.
+
+**Does it post automatically without asking?**
+No, and it cannot. `preview_post` is pure and does zero network I/O; it returns a cost estimate
+and a `confirm_nonce` valid for 10 minutes. `publish_post` is the only writer, and it requires
+either MCP elicitation or that nonce. With no credentials present it cannot spend at all.
+
+**What does it cost to run?**
+The software is free (MIT). X charges roughly $0.015 per post and ~$0.20 for a post containing a
+URL, billed to your own X app — set daily and monthly caps in the X developer portal. Drafting
+runs inside your existing Claude session, so there is no separate AI API bill.
+
+**Does it need an AI API key?**
+No. x-poster calls no AI itself. The drafting happens in your Claude Code or Claude Desktop
+session, covered by the subscription you already pay for.
 
 ## License
 

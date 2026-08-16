@@ -29,14 +29,16 @@
 //   node --env-file=./your.env x-post.mjs --list-scheduled [--status pending]                # list rows (posted → posted_tweet_id)
 //   node --env-file=./your.env x-post.mjs --cancel <id>                                      # cancel a pending row
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { buildPlan, postThread, uploadMedia, refreshAccessToken, persistRefreshToken, resolveMaxChars } from "./_poster.mjs";
 import { resolveVibedraftConfig, validateSchedule, validateBulkSchedule, makeScheduleClient } from "./_scheduler.mjs";
+import { buildArticlePlan, createArticleDraft, publishArticleDraft, loadArticleMarkdown, coverMediaFor } from "./_article.mjs";
 
 // ---- CLI entry (only when run directly, not when imported by tests) ----
 export function parseArgs(argv) { // exported for core/_tests/surface-parity.test.mjs
-  const out = { dryRun: false, confirm: false, tweets: [], image: undefined, video: undefined, uploadOnly: false, at: undefined, bulk: undefined, listScheduled: false, status: undefined, since: undefined, cancel: undefined };
+  const out = { dryRun: false, confirm: false, tweets: [], image: undefined, video: undefined, uploadOnly: false, at: undefined, bulk: undefined, listScheduled: false, status: undefined, since: undefined, cancel: undefined, article: undefined, title: undefined, publish: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") out.dryRun = true;
@@ -50,6 +52,10 @@ export function parseArgs(argv) { // exported for core/_tests/surface-parity.tes
     else if (a === "--status") out.status = argv[++i];
     else if (a === "--since") out.since = argv[++i];
     else if (a === "--cancel") out.cancel = argv[++i];
+    else if (a === "--article") out.article = argv[++i]; // path to a .md file to publish as a long-form X Article
+    else if (a === "--title") out.title = argv[++i];     // article title (optional if the md has title: frontmatter)
+    else if (a === "--publish") out.publish = true;      // article only: go PUBLIC (default is a private draft)
+    else if (a === "--cover") out.cover = argv[++i];      // article only: path to the banner image (5:2, 1920x768)
     else if (a === "--text") out.tweets.push(argv[++i]);
     else if (a === "--thread") { while (argv[i + 1] && !argv[i + 1].startsWith("--")) out.tweets.push(argv[++i]); }
   }
@@ -109,6 +115,64 @@ async function main() {
   if (args.cancel) {
     const canceled = await scheduleClientOrExit().cancelScheduled(args.cancel);
     console.log(JSON.stringify({ canceled }, null, 2));
+    return;
+  }
+
+  // Article path — long-form. Two gates, not one: --confirm creates a PRIVATE
+  // draft, and --publish is what makes it public. A draft is readable in X's
+  // editor and discardable; a published article under your byline is neither,
+  // so the irreversible step gets its own flag rather than riding on --confirm.
+  if (args.article) {
+    if (!existsSync(args.article)) { console.error(`ERROR: article not found: ${args.article}`); process.exit(2); }
+    // Check the cover before doing any work. A missing banner discovered after
+    // the draft exists means an article on X without the image it was meant to
+    // have, and drafts cannot be deleted through the API.
+    if (args.cover && !existsSync(args.cover)) { console.error(`ERROR: cover not found: ${args.cover}`); process.exit(2); }
+    const plan = buildArticlePlan({
+      title: args.title,
+      markdown: loadArticleMarkdown(args.article),
+      dryRun: args.dryRun,
+      hasCreds,
+    });
+    console.log(JSON.stringify({
+      title: plan.title,
+      blocks: plan.blocks,
+      blockCounts: plan.blockCounts,
+      words: plan.words,
+      characters: plan.characters,
+      links: plan.links,
+      estimatedCostUsd: plan.estimatedCostUsd,
+      costNote: plan.costNote,
+      warnings: plan.warnings,
+      errors: plan.errors,
+      action: plan.action,
+    }, null, 2));
+    for (const w of plan.warnings) console.error(`WARN: ${w}`);
+    if (plan.errors.length) { console.error("VALIDATION ERRORS:", plan.errors.join("; ")); process.exit(2); }
+
+    if (!args.confirm || args.dryRun) {
+      console.error(`NOT CREATING ARTICLE (${args.dryRun ? "dry-run" : "missing --confirm"}).`);
+      return;
+    }
+    if (!hasCreds) { console.error("ERROR: article publishing needs credentials."); process.exit(2); }
+
+    const token = await refreshAccessToken(creds, onRotatedToken);
+    let coverMedia = null;
+    if (args.cover) {
+      console.error(`Uploading cover: ${args.cover}…`);
+      coverMedia = coverMediaFor(await uploadMedia(token, args.cover));
+    }
+    console.error(`Creating a private draft: "${plan.title}" (${plan.words} words)…`);
+    const draft = await createArticleDraft({ title: plan.title, contentState: plan.contentState, coverMedia }, token);
+    if (!args.publish) {
+      console.log(JSON.stringify({ articleId: draft.id, published: false }, null, 2));
+      console.error(`Draft created (id ${draft.id}). Nothing is public. Re-run with --publish to go live.`);
+      return;
+    }
+    await publishArticleDraft(draft.id, token);
+    const url = `https://x.com/i/article/${draft.id}`;
+    console.log(JSON.stringify({ articleId: draft.id, published: true, url }, null, 2));
+    console.error(`Published: ${url}`);
     return;
   }
 
@@ -211,6 +275,11 @@ async function main() {
   console.log(JSON.stringify({ posted: ids, urls: ids.map((id) => `https://x.com/i/web/status/${id}`) }, null, 2));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run guard. `file://${process.argv[1]}` is WRONG three ways and each one fails silently
+// (main never runs, exit 0, no output, nothing posted): a path containing a space compares
+// a literal " " against import.meta.url's "%20"; a symlinked install compares the link
+// against the resolved target; and on macOS /tmp is itself a symlink to /private/tmp.
+// pathToFileURL handles the encoding, realpathSync handles the symlinks.
+if (import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   main().catch((e) => { console.error("ERROR:", e.message); process.exit(1); });
 }
