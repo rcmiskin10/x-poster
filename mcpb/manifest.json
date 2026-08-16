@@ -1,16 +1,20 @@
 {
   "manifest_version": "0.3",
   "name": "x-poster",
-  "version": "1.9.0",
+  "version": "1.12.0",
   "description": "Post a tweet or thread (with optional image) to X, or schedule posts — one or up to 20 in bulk — via vibedraft. Preview cost first; never auto-publishes.",
-  "author": { "name": "rcmisk" },
+  "author": {
+    "name": "rcmisk"
+  },
   "license": "MIT",
   "server": {
     "type": "node",
     "entry_point": "server.mjs",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/server.mjs"],
+      "args": [
+        "${__dirname}/server.mjs"
+      ],
       "env": {
         "X_CLIENT_ID": "${user_config.X_CLIENT_ID}",
         "X_CLIENT_SECRET": "${user_config.X_CLIENT_SECRET}",
@@ -23,15 +27,50 @@
     }
   },
   "tools": [
-    { "name": "preview_post", "description": "Validate + cost-preview a tweet/thread. No side effects." },
-    { "name": "publish_post", "description": "Post to X after explicit confirmation. The only writer." },
-    { "name": "preview_bulk", "description": "Validate + cost-preview up to 20 posts to bulk-schedule via vibedraft. No side effects." },
-    { "name": "schedule_bulk", "description": "Schedule up to 20 posts (each at its own time) via vibedraft after explicit confirmation." },
-    { "name": "schedule_post", "description": "Schedule a post/thread for a future time via vibedraft after explicit confirmation." },
-    { "name": "list_scheduled", "description": "List vibedraft scheduled posts (read-only)." },
-    { "name": "cancel_scheduled", "description": "Cancel a pending vibedraft scheduled post before it fires." },
-    { "name": "authorize", "description": "Connect your X account — returns a link to click. One-time, no terminal." },
-    { "name": "auth_instructions", "description": "Setup help (X app checklist + auth options)." }
+    {
+      "name": "preview_post",
+      "description": "Validate + cost-preview a tweet/thread. No side effects."
+    },
+    {
+      "name": "publish_post",
+      "description": "Post to X after explicit confirmation. The only writer."
+    },
+    {
+      "name": "preview_article",
+      "description": "Convert markdown to an X Article and preview it. No side effects."
+    },
+    {
+      "name": "publish_article",
+      "description": "Create an X Article: a private draft by default, public only with publish:true."
+    },
+    {
+      "name": "preview_bulk",
+      "description": "Validate + cost-preview up to 20 posts to bulk-schedule via vibedraft. No side effects."
+    },
+    {
+      "name": "schedule_bulk",
+      "description": "Schedule up to 20 posts (each at its own time) via vibedraft after explicit confirmation."
+    },
+    {
+      "name": "schedule_post",
+      "description": "Schedule a post/thread for a future time via vibedraft after explicit confirmation."
+    },
+    {
+      "name": "list_scheduled",
+      "description": "List vibedraft scheduled posts (read-only)."
+    },
+    {
+      "name": "cancel_scheduled",
+      "description": "Cancel a pending vibedraft scheduled post before it fires."
+    },
+    {
+      "name": "authorize",
+      "description": "Connect your X account — returns a link to click. One-time, no terminal."
+    },
+    {
+      "name": "auth_instructions",
+      "description": "Setup help (X app checklist + auth options)."
+    }
   ],
   "user_config": {
     "X_CLIENT_ID": {

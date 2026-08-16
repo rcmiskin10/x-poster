@@ -306,3 +306,114 @@ test("MCP: makeTools exposes the bulk handler pair", () => {
     assert.equal(typeof tools[name]?.handler, "function", `makeTools missing ${name}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// ARTICLE MANIFEST — long-form. Same discipline as CAPABILITIES above: one row
+// per user-facing field, checked against every surface that should carry it.
+//
+// Articles have no coreParam column because they do not flow through
+// postThread; the core entry points are buildArticlePlan + createArticleDraft.
+// ---------------------------------------------------------------------------
+const ARTICLE_FIELDS = [
+  { name: "title",         cliFlag: "--title",   cliKey: "title",   mcpField: "title" },
+  { name: "markdown file", cliFlag: "--article", cliKey: "article", mcpField: "markdown_path" },
+  { name: "inline markdown", cliFlag: null,      cliKey: null,      mcpField: "markdown" },
+];
+
+test("core: article.mjs exports the whole article capability", async () => {
+  const article = await import("../article.mjs");
+  for (const fn of [
+    "parseInline", "mdToContentState", "stripFrontmatter", "buildArticlePlan",
+    "createArticleDraft", "publishArticleDraft", "loadArticleMarkdown", "classifyArticleError",
+  ]) {
+    assert.equal(typeof article[fn], "function", `core/article.mjs is missing ${fn}`);
+  }
+  // Cost must stay null, not drift into a fabricated per-post number.
+  const plan = article.buildArticlePlan({ title: "t", markdown: "# h\n\nbody" });
+  assert.equal(plan.estimatedCostUsd, null,
+    "articles are not on X's published price list — cost must be null, never guessed");
+});
+
+test("CLI: parseArgs wires every article flag", () => {
+  for (const f of ARTICLE_FIELDS.filter((r) => r.cliFlag)) {
+    const out = parseArgs([f.cliFlag, "val"]);
+    assert.equal(out[f.cliKey], "val",
+      `CLI drift: parseArgs([${f.cliFlag}]) does not populate .${f.cliKey} — ` +
+      `"${f.name}" would silently no-op (the --video incident, article edition)`);
+  }
+  assert.equal(parseArgs(["--publish"]).publish, true,
+    "CLI drift: --publish does not populate .publish — an article would never go public");
+  assert.equal(parseArgs([]).publish, false, "--publish must default to false (drafts are the safe default)");
+});
+
+test("CLI: article args actually reach the core, and --publish gates the public step", () => {
+  assert.match(CLI_SRC, /buildArticlePlan\(\{[\s\S]*?title: args\.title[\s\S]*?\}\)/,
+    "CLI drift: args.title is parsed but never passed to buildArticlePlan");
+  assert.match(CLI_SRC, /loadArticleMarkdown\(args\.article\)/,
+    "CLI drift: args.article is parsed but never read");
+  assert.match(CLI_SRC, /createArticleDraft\(/,
+    "CLI drift: the article path never creates a draft");
+  assert.match(CLI_SRC, /if \(!args\.publish\)[\s\S]{0,400}?published: false/,
+    "CLI drift: --publish no longer gates the public step — every draft would publish");
+});
+
+test("MCP: article tools declare every field and keep the confirm_nonce gate", () => {
+  for (const toolName of ["preview_article", "publish_article"]) {
+    const block = registerToolBlock(toolName);
+    assert.ok(block.length > 0, `MCP drift: no registerTool block for ${toolName}`);
+  }
+  // Both tools share articleSourceShape, so assert the shape itself carries the fields.
+  const shape = MCP_SRC.match(/const articleSourceShape = \{[\s\S]*?\n  \};/)?.[0] ?? "";
+  for (const f of ARTICLE_FIELDS) {
+    assert.match(shape, new RegExp(`\\b${f.mcpField}: z\\.`),
+      `MCP drift: articleSourceShape is missing "${f.mcpField}" — models cannot pass "${f.name}"`);
+  }
+  const pub = registerToolBlock("publish_article");
+  assert.match(pub, /\bconfirm_nonce: z\./, "MCP drift: publish_article lost the confirm_nonce gate");
+  assert.match(pub, /\bpublish: z\.boolean\(\)/, "MCP drift: publish_article lost the publish flag");
+});
+
+test("MCP: makeTools exposes the article handler pair", () => {
+  const tools = makeTools({ postThread: async () => ["1"], statePath: "/tmp/parity-x" });
+  for (const name of ["preview_article", "publish_article"]) {
+    assert.equal(typeof tools[name]?.handler, "function", `makeTools missing ${name}`);
+  }
+});
+
+test("MCP: preview_article is pure and mints a nonce publish_article accepts", async () => {
+  const created = [];
+  const tools = makeTools({
+    postThread: async () => ["1"],
+    statePath: "/tmp/parity-x",
+    postArticle: async (a) => { created.push(a); return { id: "art1", url: null }; },
+  });
+  const md = "# Heading\n\nSome body text here.";
+  const pre = await tools.preview_article.handler({ title: "T", markdown: md });
+  assert.ok(pre.confirm_nonce, "preview_article must mint a nonce");
+  assert.equal(created.length, 0, "preview_article must not create anything");
+
+  const out = await tools.publish_article.handler({ title: "T", markdown: md, confirm_nonce: pre.confirm_nonce });
+  assert.equal(created.length, 1, "publish_article must call the article adapter");
+  assert.equal(out.articleId, "art1");
+  assert.equal(out.published, false, "publish must default to draft-only");
+});
+
+test("MCP: a post nonce cannot be replayed to publish an article", async () => {
+  const tools = makeTools({ postThread: async () => ["1"], statePath: "/tmp/parity-x", postArticle: async () => ({ id: "x" }) });
+  const post = await tools.preview_post.handler({ text: "hello" });
+  await assert.rejects(
+    () => tools.publish_article.handler({ title: "T", markdown: "# h\n\nbody", confirm_nonce: post.confirm_nonce }),
+    /confirm_nonce/,
+    "a post nonce must never verify an article publish",
+  );
+});
+
+test("MCP: publish_article refuses a nonce minted for different content", async () => {
+  const tools = makeTools({ postThread: async () => ["1"], statePath: "/tmp/parity-x", postArticle: async () => ({ id: "x" }) });
+  const pre = await tools.preview_article.handler({ title: "T", markdown: "# h\n\noriginal body" });
+  await assert.rejects(
+    () => tools.publish_article.handler({ title: "T", markdown: "# h\n\nSWAPPED body", confirm_nonce: pre.confirm_nonce }),
+    /confirm_nonce/,
+    "content is frozen at the nonce — a swapped body must not publish under an old approval",
+  );
+});

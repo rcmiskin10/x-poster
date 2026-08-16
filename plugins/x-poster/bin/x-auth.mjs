@@ -17,6 +17,8 @@
 //     (reads X_CLIENT_ID, X_CLIENT_SECRET; optional X_AUTH_PORT)
 
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { startAuthSession } from "./_auth.mjs";
 
 // Re-exported for bin/_tests/x-auth.test.mjs and any external consumers.
@@ -66,6 +68,8 @@ async function main() {
   console.error("\nThen test posting with:\n  node --env-file=./your.env x-post.mjs --dry-run --text \"hello from the terminal\"\n");
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// See x-post.mjs for why the naive file:// + argv[1] guard fails silently on paths with
+// spaces, symlinked installs, and macOS /tmp. Same fix here.
+if (import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   main().catch((e) => { console.error("ERROR:", e.message); process.exit(1); });
 }

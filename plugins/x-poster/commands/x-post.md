@@ -1,7 +1,7 @@
 ---
 description: "Draft (or take) a tweet/thread, optionally attach an image, score it against a built-in bookmarkability rubric, preview the cost, and post to X — ONLY after you explicitly confirm. Never auto-publishes. Can also SCHEDULE for later via vibedraft (single posts may carry one image or mp4 video; bulk is text-only), including BULK-scheduling up to 20 posts in one confirmed action. X pay-per-use (~$0.015/post, ~$0.20/post-with-URL)."
 argument-hint: "<text to post | 'draft a post about X' | 'draft N posts about X and schedule them across the week'> [--image <path>] [--video <path>] [--reply-to <tweet-id>] [--at <ISO time | 'tomorrow 9am'>]"
-allowed-tools: ["Read", "Bash", "mcp__x-poster__preview_post", "mcp__x-poster__publish_post", "mcp__x-poster__preview_bulk", "mcp__x-poster__schedule_bulk", "mcp__x-poster__schedule_post", "mcp__x-poster__list_scheduled", "mcp__x-poster__cancel_scheduled", "mcp__x-poster__authorize", "mcp__x-poster__auth_instructions"]
+allowed-tools: ["Read", "Bash", "mcp__x-poster__preview_post", "mcp__x-poster__publish_post", "mcp__x-poster__preview_article", "mcp__x-poster__publish_article", "mcp__x-poster__preview_bulk", "mcp__x-poster__schedule_bulk", "mcp__x-poster__schedule_post", "mcp__x-poster__list_scheduled", "mcp__x-poster__cancel_scheduled", "mcp__x-poster__authorize", "mcp__x-poster__auth_instructions"]
 ---
 
 # /x-poster:x-post
@@ -21,6 +21,11 @@ one-line emoji status so the user always knows where the workflow is.
   to the route line. A scheduled post may carry ONE image (jpg/png/webp ≤ 5 MB) or mp4 video
   (≤ 512 MB) — pass `image`/`video` to `schedule_post`; the file uploads to vibedraft AFTER the
   gate, so a declined draft never spends an upload.
+- A LONG-FORM article is named ("post this as an article", "publish this .md as an X article", a
+  markdown file over ~1,000 words) → `📰 route: article`. This is a different format from a tweet
+  or a thread: use `preview_article` then `publish_article`, NOT `preview_post`. Pass
+  `markdown_path` for a file. `publish_article` creates a **private draft** unless the user
+  explicitly says publish/go live — only then pass `publish: true`. Requires X Premium.
 - MULTIPLE independent posts with times ("draft 5 posts and schedule them across the week",
   "schedule these 10, one per morning") → `📅 mode: bulk-schedule` (max 20 per batch). Bulk is
   TEXT-ONLY (items carrying media are rejected loudly — never silently drop media to make a batch
